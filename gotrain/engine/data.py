@@ -1017,6 +1017,24 @@ class GeoBenchDataset:
         std = np.asarray(stats.std, np.float32)[self.channel_idx]
         return mean, np.where(std < 1e-6, 1.0, std).astype(np.float32)
 
+    def __getstate__(self) -> dict:
+        """Pickled for DataLoader workers (forkserver/spawn): never ship the memory-mapped cache
+        itself (pickling a memmap copies the whole array); each worker reopens it."""
+        state = self.__dict__.copy()
+        state["_cache_files"] = self._cache_files() if self.disk_cache is not None else None
+        state["disk_cache"] = None
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        files = state.pop("_cache_files", None)
+        self.__dict__.update(state)
+        if files is not None:  # the parent already validated the fingerprint
+            self.disk_cache = tuple(np.load(f, mmap_mode="r") for f in files)
+
+    def _cache_files(self) -> tuple[str, str]:
+        folder = cache_root() / self.task_name
+        return str(folder / f"{self.split}_x.npy"), str(folder / f"{self.split}_y.npy")
+
     def __len__(self) -> int:
         return len(self.indices)
 

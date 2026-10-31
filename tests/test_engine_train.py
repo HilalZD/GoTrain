@@ -357,3 +357,15 @@ def test_budget_stopped_run_is_flagged_in_metrics_json(tmp_path):
     metrics = json.loads((run / "metrics.json").read_text())
     assert result.status == "ok", result.error
     assert metrics["stop_reason"] == "budget" and metrics["stopped_by_budget"] is True
+
+
+def test_loader_settings_for_gpu_and_cpu():
+    """forkserver (spawn where it doesn't exist), pinned memory and persistent workers on GPU."""
+    import multiprocessing
+
+    gpu = engine.loader_settings(torch.device("cuda"))
+    assert 1 <= gpu["num_workers"] <= 4
+    assert gpu["pin_memory"] is True and gpu["persistent_workers"] is True
+    expected = "forkserver" if "forkserver" in multiprocessing.get_all_start_methods() else "spawn"
+    assert gpu["multiprocessing_context"] == expected
+    assert engine.loader_settings(torch.device("cpu")) == {"num_workers": 0}

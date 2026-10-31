@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import multiprocessing
 import time
 from pathlib import Path
 
@@ -117,17 +118,16 @@ def main(argv: list[str] | None = None) -> None:
     val_ds = GeoBenchDataset(TASK, "val", norm="zscore")
     if args.smoke:
         train_ds, val_ds = Subset(train_ds, range(16)), Subset(val_ds, range(16))
-    pin = device.type == "cuda"
-    train_dl = DataLoader(
-        train_ds,
-        args.batch_size,
-        shuffle=True,
-        drop_last=True,
-        num_workers=args.workers,
-        pin_memory=pin,
-        persistent_workers=args.workers > 0,
-    )
-    val_dl = DataLoader(val_ds, args.batch_size * 2, num_workers=args.workers, pin_memory=pin)
+    workers = {"num_workers": args.workers}
+    if args.workers > 0:  # forkserver: forking after CUDA init can deadlock (see engine)
+        methods = multiprocessing.get_all_start_methods()
+        workers |= {
+            "pin_memory": device.type == "cuda",
+            "persistent_workers": True,
+            "multiprocessing_context": "forkserver" if "forkserver" in methods else "spawn",
+        }
+    train_dl = DataLoader(train_ds, args.batch_size, shuffle=True, drop_last=True, **workers)
+    val_dl = DataLoader(val_ds, args.batch_size * 2, **workers)
     print(f"[data] train {len(train_ds)} / val {len(val_ds)} tiles at full 320x320 resolution")
 
     model = build_model().to(device)

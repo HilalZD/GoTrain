@@ -163,3 +163,32 @@ def test_build_cache_script_dry_run_writes_nothing(tmp_path, monkeypatch, capsys
     out = capsys.readouterr().out
     assert "m-eurosat" in out and "0.64 GB" in out and "never cached" in out
     assert not root.exists()
+
+
+@needs_eurosat
+def test_cached_dataset_pickles_small_and_reopens_its_cache(use_cache_dir):
+    """DataLoader workers get a pickled copy: the memmapped cache must not be inside it."""
+    import pickle
+
+    ds = data.GeoBenchDataset("m-eurosat", "val")
+    blob = pickle.dumps(ds)
+    assert len(blob) < 5_000_000  # the val images alone are 213 MB
+    copy = pickle.loads(blob)
+    assert copy.disk_cache is not None
+    import torch
+
+    assert torch.equal(copy[3][0], ds[3][0])
+
+
+@needs_eurosat
+def test_worker_processes_give_the_same_batches(use_cache_dir):
+    """2 worker processes (spawn, the strictest start method) vs reading hdf5 in-process."""
+    import torch
+    from torch.utils.data import DataLoader
+
+    idx = list(range(0, 64))
+    cached = data.GeoBenchDataset("m-eurosat", "val", indices=idx)
+    direct = data.GeoBenchDataset("m-eurosat", "val", indices=idx, use_cache=False)
+    workers = DataLoader(cached, 16, num_workers=2, multiprocessing_context="spawn")
+    for (xw, yw), (xd, yd) in zip(workers, DataLoader(direct, 16), strict=True):
+        assert torch.equal(xw, xd) and torch.equal(yw, yd)

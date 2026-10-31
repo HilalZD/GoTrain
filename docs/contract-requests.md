@@ -58,7 +58,7 @@ Each entry: what, why, and the smallest change that would do it.
 - **Possible change (yours):** also accept names containing `_dev_` (e.g. `gotrain_dev_serena`)
   as dev homes, if you want fake runs to work there.
 
-## 6. Test-time augmentation flag on evaluate() (M6, needs a small interface change)
+## 6. Test-time augmentation flag on evaluate() (RESOLVED by contract v2)
 
 - **What exists:** `gotrain.engine.train.evaluate(task, checkpoint_path, split, tta=False)`.
   `tta=True` averages the model's outputs over the 8 flip/rot90 views (for segmentation, each
@@ -69,3 +69,27 @@ Each entry: what, why, and the smallest change that would do it.
   forwarding it; `FakeEngine.evaluate` can accept and ignore it.
 - **Rule to keep:** choose TTA on VALIDATION only (compare `evaluate(..., "val", tta=True)`
   with `tta=False`), then pass the same choice to `final_test`. Never decide it on test.
+
+## 7. contract v2 `predict()`: each checkpoint uses its own normalisation (approved by Serena)
+
+- **v2 says:** "The engine normalises (train-split band stats)".
+- **What the engine does:** `predict()` and `evaluate()` take raw images in the card's band
+  order, and **each checkpoint applies the normalisation it was trained with**:
+  - `imagenet` / `none`: the train-split z-score (exactly v2's wording);
+  - `ssl4eo_s2`: /10000, bands reordered BY NAME to TorchGeo's 13-band order, missing bands
+    zero-filled. That is how those weights were pretrained; z-scoring their input would
+    break them.
+  The caller sees no difference: raw images in, probabilities out. Ensembles may mix both
+  kinds; every member gets its own inputs (and its own `img_size`).
+- **Change needed:** none; perhaps reword v2 to "each checkpoint's own normalisation".
+
+## 8. contract v2 `per_sample` for multilabel tasks (approved by Serena; not one of our 4 tasks)
+
+- v2 defines `per_sample` for classification and segmentation only.
+- **What the engine does for multilabel:** `per_sample = {"tp": [...], "fp": [...], "fn":
+  [...]}`, one count per image (labels decided at probability 0.5); `score` = micro-F1 =
+  2·ΣTP / (2·ΣTP + ΣFP + ΣFN), `metric_name` stays `"f1"`. `predict()` returns sigmoid
+  `probabilities` [N, K] and 0/1 `labels` [N, K].
+- **Change needed:** add this to contract-v2.md if multilabel tasks (e.g. m-bigearthnet) are
+  ever used.
+

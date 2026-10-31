@@ -68,6 +68,7 @@ SAVE_MARGIN_S = 3.0
 RESERVE_CAP = 0.5  # the validation reserve never takes more than half the training window
 VAL_COST_RATIO = 0.5  # before the first validation: a val sample ~ half a train sample's cost
 CKPT_NAME = "checkpoints/best.ckpt"
+EVAL_BATCH = 32
 
 
 # ---------------------------------------------------------------------------------------------
@@ -263,9 +264,18 @@ def _tta_views(x: Any) -> list[tuple[Any, Any]]:
     return views
 
 
-def forward(model: Any, x: Any, img_size: int, segmentation: bool, tta: bool) -> Any:
-    """Logits at the input's native size (segmentation) or per sample (classification)."""
+def class_probs(model: Any, x: Any, img_size: int, task_type: str, tta: bool = False) -> Any:
+    """Class probabilities for a batch of model inputs (already normalised).
+
+    classification: softmax, [N, K]          multilabel: sigmoid per class, [N, K]
+    segmentation:   [N, K, H, W] at the input's native size; a binary U-Net with one output
+                    channel p becomes the two classes [1 - p, p].
+    tta=True averages PROBABILITIES over the 8 flip/rot90 views; segmentation outputs are
+    rotated/flipped back before averaging. Every image is processed independently of the
+    rest of the batch (the model must be in eval mode).
+    """
     import torch
+    import torch.nn.functional as F
 
     native = x.shape[-2:]
     views = _tta_views(x) if tta and x.shape[-1] == x.shape[-2] else [(None, None)]
@@ -273,14 +283,21 @@ def forward(model: Any, x: Any, img_size: int, segmentation: bool, tta: bool) ->
     for fwd, back in views:
         xv = fwd(x) if fwd else x
         with amp(x.device):
-            out = model(resize(xv, img_size)).float()
-        if segmentation:
-            if out.shape[-2:] != native:
-                out = torch.nn.functional.interpolate(
-                    out, size=native, mode="bilinear", align_corners=False
-                )
-            out = back(out) if back else out
-        total = out if total is None else total + out
+            logits = model(resize(xv, img_size)).float()
+        if task_type == "segmentation":
+            if logits.shape[-2:] != native:
+                logits = F.interpolate(logits, size=native, mode="bilinear", align_corners=False)
+            if logits.shape[1] == 1:
+                p1 = torch.sigmoid(logits)
+                probs = torch.cat([1 - p1, p1], dim=1)
+            else:
+                probs = logits.softmax(1)
+            probs = back(probs) if back else probs
+        elif task_type == "multilabel":
+            probs = torch.sigmoid(logits)
+        else:
+            probs = logits.softmax(1)
+        total = probs if total is None else total + probs
     return total / len(views)
 
 
@@ -309,18 +326,17 @@ def run_inference(
     with torch.no_grad():
         for x, y in loader:
             x = x.to(device, non_blocking=True)
-            logits = forward(model, x, img_size, seg, tta)
+            probs_t = class_probs(model, x, img_size, task_type, tta)
             if task_type == "classification":
-                probs = logits.softmax(1).cpu().numpy()
+                probs = probs_t.cpu().numpy()
                 out["probs"].append(probs)
                 out["y_pred"].append(probs.argmax(1))
                 out["y_true"].append(y.numpy())
             elif task_type == "multilabel":
-                out["probs"].append(torch.sigmoid(logits).cpu().numpy())
+                out["probs"].append(probs_t.cpu().numpy())
                 out["y_true"].append(y.numpy())
             else:
-                pred = (logits[:, 0] > 0).long() if logits.shape[1] == 1 else logits.argmax(1)
-                pred, yt = pred.cpu().numpy(), y.numpy()
+                pred, yt = probs_t.argmax(1).cpu().numpy(), y.numpy()
                 for p_img, t_img in zip(pred, yt, strict=True):
                     valid = t_img != IGNORE_INDEX
                     cm = np.bincount(
@@ -694,39 +710,169 @@ def _train(
 # ---------------------------------------------------------------------------------------------
 # evaluate()
 # ---------------------------------------------------------------------------------------------
-def evaluate(task: str, checkpoint_path: Path, split: str, tta: bool = False) -> dict:
-    """Score a checkpoint on 'val' or the test split (the latter only via tools/final_test.py).
+def checkpoint_list(checkpoint_path: Path | str | list) -> list[Path]:
+    """One checkpoint or a list of them (an ensemble) -> a non-empty list of paths."""
+    paths = [checkpoint_path] if isinstance(checkpoint_path, str | Path) else list(checkpoint_path)
+    if not paths:
+        raise ValueError("no checkpoints given")
+    return [Path(p) for p in paths]
 
-    tta=True averages predictions over the 8 flip/rot90 views (test-time augmentation).
+
+def load_ensemble(task: str, checkpoint_path: Path | list, device: Any) -> list[tuple[dict, Any]]:
+    """Load every checkpoint (eval mode). Members must share task and class count; backbones,
+    weights, bands and image sizes may differ (each model gets its own inputs)."""
+    members = [load_checkpoint(p, device) for p in checkpoint_list(checkpoint_path)]
+    wrong = [c["task"] for c, _ in members if c["task"] != task]
+    if wrong:
+        raise ValueError(f"checkpoint(s) for {sorted(set(wrong))} cannot score task {task!r}")
+    if len({(c["n_classes"], c["task_type"]) for c, _ in members}) > 1:
+        counts = sorted({c["n_classes"] for c, _ in members})
+        raise ValueError(f"ensemble members disagree on the classes ({counts}); not combinable")
+    for _, model in members:
+        model.eval()
+    return members
+
+
+def checkpoint_inputs(raw: Any, ckpt: dict, bands: list[str]) -> Any:
+    """Raw images [N, C, H, W] (dataset units, channels = `bands`) -> this checkpoint's inputs.
+
+    Selects/reorders its bands by name, zero-fills the ones it expects but the task lacks
+    (ssl4eo_s2), and applies its own normalisation (train z-score, or /10000 for ssl4eo_s2),
+    exactly as GeoBenchDataset does during training.
+    """
+    import torch
+
+    zero = set(ckpt["spec"].get("zero_fill", []))
+    channels = [
+        torch.zeros_like(raw[:, 0]) if b in zero else raw[:, bands.index(b)]
+        for b in ckpt["spec"]["bands"]
+    ]
+    x = torch.stack(channels, dim=1)
+    mean = torch.tensor(ckpt["norm_mean"], dtype=x.dtype, device=x.device).view(1, -1, 1, 1)
+    std = torch.tensor(ckpt["norm_std"], dtype=x.dtype, device=x.device).view(1, -1, 1, 1)
+    return torch.nan_to_num((x - mean) / std, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def ensemble_probs(members: list, raw: Any, bands: list[str], tta: bool) -> Any:
+    """Average of every member's class probabilities (each with its own inputs and size)."""
+    total = None
+    for ckpt, model in members:
+        x = checkpoint_inputs(raw, ckpt, bands)
+        probs = class_probs(model, x, ckpt["config"]["img_size"], ckpt["task_type"], tta)
+        total = probs if total is None else total + probs
+    return total / len(members)
+
+
+def score_from_per_sample(task_type: str, per_sample: dict) -> float:
+    """The split's metric, computed only from per_sample (as contract v2 requires).
+
+    classification: mean(correct)
+    segmentation:   dataset-level mIoU: SUM intersection and union over all images per class,
+                    then average sum(I_k) / sum(U_k) over classes with sum(U_k) > 0
+                    (not the mean of per-image IoUs)
+    multilabel:     micro-F1 = 2 TP / (2 TP + FP + FN), summed over images
+    """
+    if task_type == "classification":
+        correct = per_sample["correct"]
+        return float(np.mean(correct)) if len(correct) else 0.0
+    if task_type == "segmentation":
+        inter = np.asarray(per_sample["intersection"], dtype=np.float64).sum(axis=0)
+        union = np.asarray(per_sample["union"], dtype=np.float64).sum(axis=0)
+        present = union > 0
+        return float(np.mean(inter[present] / union[present])) if present.any() else 0.0
+    tp, fp, fn = (float(np.sum(per_sample[k])) for k in ("tp", "fp", "fn"))
+    return 2 * tp / max(2 * tp + fp + fn, 1.0)
+
+
+def per_sample_batch(task_type: str, probs: np.ndarray, y: np.ndarray, k: int) -> dict:
+    """per_sample entries for one batch (lists, one item per image, in dataset order)."""
+    if task_type == "classification":
+        return {"correct": (probs.argmax(1) == y).astype(int).tolist()}
+    if task_type == "multilabel":
+        pred, true = probs > 0.5, y > 0.5
+        return {
+            "tp": (pred & true).sum(1).tolist(),
+            "fp": (pred & ~true).sum(1).tolist(),
+            "fn": (~pred & true).sum(1).tolist(),
+        }
+    pred = probs.argmax(1)
+    valid = y != IGNORE_INDEX
+    inter, union = [], []
+    for c in range(k):
+        p_c, t_c = pred == c, y == c
+        inter.append(((p_c & t_c) & valid).sum(axis=(1, 2)))
+        union.append(((p_c | t_c) & valid).sum(axis=(1, 2)))
+    return {
+        "intersection": np.stack(inter, axis=1).astype(int).tolist(),
+        "union": np.stack(union, axis=1).astype(int).tolist(),
+    }
+
+
+def evaluate(task: str, checkpoint_path: Path | list, split: str, tta: bool = False) -> dict:
+    """Contract v2: score one checkpoint or an ensemble on the FULL 'val' or test split.
+
+    The test split is only ever requested by tools/final_test.py. Ensembles average the
+    members' class probabilities; tta averages over the 8 flip/rot90 views. `score` is
+    computed from `per_sample` (see score_from_per_sample).
     """
     import torch
     from torch.utils.data import DataLoader
 
-    if split not in ("val", TEST_SPLIT):
+    if split not in ("val", TEST_SPLIT):  # engine names; data.py maps "val" to geobench "valid"
         raise ValueError(f"split must be 'val' or the test split, got {split!r}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    ckpt, model = load_checkpoint(checkpoint_path, device)
-    if ckpt["task"] != task:
-        raise ValueError(f"checkpoint is for {ckpt['task']!r}, not {task!r}")
-    ds = checkpoint_dataset(ckpt, split, allow_test=split == TEST_SPLIT)
-    loader = DataLoader(ds, ckpt["config"]["batch_size"], num_workers=0)
-    preds = run_inference(
-        model,
-        loader,
-        ckpt["task_type"],
-        ckpt["n_classes"],
-        ckpt["config"]["img_size"],
-        device,
-        tta=tta,
-    )
+    members = load_ensemble(task, checkpoint_path, device)
+    first = members[0][0]
+    kind, k = first["task_type"], first["n_classes"]
+    raw_ds = GeoBenchDataset(task, split, bands="all", norm="none", allow_test=split == TEST_SPLIT)
+    per_sample: dict[str, list] = {}
+    with torch.no_grad():
+        for raw, y in DataLoader(raw_ds, batch_size=EVAL_BATCH, num_workers=0):
+            probs = ensemble_probs(members, raw.to(device), raw_ds.bands, tta).cpu().numpy()
+            for key, values in per_sample_batch(kind, probs, y.numpy(), k).items():
+                per_sample.setdefault(key, []).extend(values)
     return {
         "task": task,
         "split": split,
-        "metric_name": ckpt["metric_name"],
-        "score": round(min(max(score(ckpt["task_type"], preds), 0.0), 1.0), 5),
-        "n_samples": len(ds),
+        "metric_name": first["metric_name"],
+        "score": round(min(max(score_from_per_sample(kind, per_sample), 0.0), 1.0), 5),
+        "n_samples": len(raw_ds),
+        "per_sample": per_sample,
+        "n_checkpoints": len(members),
         "tta": tta,
     }
+
+
+def predict(task: str, checkpoint_path: Path | list, images: np.ndarray, tta: bool = False) -> dict:
+    """Contract v2: predictions for caller-supplied images; reads no dataset split.
+
+    images: float N x C x H x W in the dataset's raw units, C and order = the card's bands.
+    Each checkpoint normalises them its own way. Returns numpy arrays:
+      probabilities float32 [N, K] or [N, K, H, W];  labels int64 [N] or [N, H, W]
+      (multilabel: labels are the 0/1 decisions at 0.5, [N, K]).
+    """
+    import torch
+
+    bands = list(describe_dataset(task).bands)
+    arr = np.asarray(images, dtype=np.float32)
+    if arr.ndim != 4 or arr.shape[1] != len(bands):
+        raise ValueError(
+            f"images must be N x {len(bands)} x H x W with bands in the order {bands}; "
+            f"got shape {arr.shape}"
+        )
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    members = load_ensemble(task, checkpoint_path, device)
+    chunks = []
+    with torch.no_grad():
+        for i in range(0, len(arr), EVAL_BATCH):
+            raw = torch.from_numpy(arr[i : i + EVAL_BATCH]).to(device)
+            chunks.append(ensemble_probs(members, raw, bands, tta).cpu().numpy())
+    probs = np.concatenate(chunks).astype(np.float32)
+    if members[0][0]["task_type"] == "multilabel":
+        labels = (probs > 0.5).astype(np.int64)
+    else:
+        labels = probs.argmax(1).astype(np.int64)
+    return {"probabilities": probs, "labels": labels, "n_checkpoints": len(members), "tta": tta}
 
 
 # Integration rule (Hilal): diagnose() lives in diagnostics.py; the agent side imports it from here.

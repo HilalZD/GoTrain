@@ -77,13 +77,10 @@ def test_unknown_task_or_band_is_error_result(engine, tmp_path):
 
 def test_evaluate_val_matches_training(engine, tmp_path):
     result = train(engine, tmp_path, config())
-    out = engine.evaluate("m-eurosat", result.checkpoint_path, "val")
-    assert out == {
-        "task": "m-eurosat",
-        "split": "val",
-        "metric_name": "accuracy",
-        "score": result.val_score,
-    }
+    out = engine.evaluate("m-eurosat", result.checkpoint_path, "val")  # v1 call
+    v1 = {k: out[k] for k in ("task", "split", "metric_name")}
+    assert v1 == {"task": "m-eurosat", "split": "val", "metric_name": "accuracy"}
+    assert out["score"] == pytest.approx(result.val_score, abs=1 / out["n_samples"])
     with pytest.raises(ValueError, match="split"):
         engine.evaluate("m-eurosat", result.checkpoint_path, "train")
 

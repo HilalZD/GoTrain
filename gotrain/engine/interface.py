@@ -1,18 +1,26 @@
-"""The contract between the agent side and the ML side.
+"""The contract between the agent side and the ML side (v2; full spec: docs/contract-v2.md).
 
-Any engine (fake or real) provides three methods:
+Any engine (fake or real) provides:
 
     train(config, budget_minutes, run_dir) -> TrainResult   scored on VALIDATION
-    evaluate(task, checkpoint_path, split) -> dict   keys: task, split, metric_name, score
+    evaluate(task, checkpoint_path | [paths], split, tta=False) -> dict
+        keys: task, split, metric_name, score, n_samples, per_sample, n_checkpoints, tta
+        per_sample: {"correct": [0/1] * N}                      (classification)
+                    {"intersection": N x K, "union": N x K}     (segmentation, pixel counts)
+        A list of checkpoints is an ensemble: their probabilities are averaged.
+    predict(task, checkpoint_path | [paths], images N x C x H x W, tta=False) -> dict
+        keys: probabilities (N x K, or N x K x H x W), labels (N, or N x H x W)
     describe_dataset(task) -> DatasetCard   built from train/val only
     diagnose(task, run_dir) -> dict   keys: per_class, confusion_matrix,
                                       curve_verdict ("overfitting"|"underfitting"|"fine"),
                                       error_grid_path (optional)
 
+v1 calls still work: evaluate(task, path, split) is evaluate(..., tta=False) on one model.
+
 The real engine is assembled from Serena's modules, imported lazily so this repo
 works before they exist:
-    gotrain.engine.train  must define  train(...), evaluate(...) and diagnose(...)
-    gotrain.engine.data   must define  describe_dataset(...)
+    gotrain.engine.train  must define  train, evaluate, diagnose and predict
+    gotrain.engine.data   must define  describe_dataset
 
 Only gotrain/tools/final_test.py may ask evaluate() for the test split.
 """
@@ -22,16 +30,25 @@ import importlib.util
 from pathlib import Path
 from typing import Protocol
 
+import numpy as np
+
 from gotrain.config import get_settings
 from gotrain.contracts import BandStats, DatasetCard, TrainConfig, TrainResult
 
 REAL_MODULES = ("gotrain.engine.train", "gotrain.engine.data")
+Checkpoints = Path | list[Path]  # one model, or an ensemble whose probabilities are averaged
 
 
 class Engine(Protocol):
     def train(self, config: TrainConfig, budget_minutes: float, run_dir: Path) -> TrainResult: ...
 
-    def evaluate(self, task: str, checkpoint_path: Path, split: str) -> dict: ...
+    def evaluate(
+        self, task: str, checkpoint_path: Checkpoints, split: str, tta: bool = False
+    ) -> dict: ...
+
+    def predict(
+        self, task: str, checkpoint_path: Checkpoints, images: np.ndarray, tta: bool = False
+    ) -> dict: ...
 
     def describe_dataset(self, task: str) -> DatasetCard: ...
 
@@ -46,9 +63,21 @@ class RealEngine:
             config, budget_minutes, run_dir
         )
 
-    def evaluate(self, task: str, checkpoint_path: Path, split: str) -> dict:
+    def evaluate(
+        self, task: str, checkpoint_path: Checkpoints, split: str, tta: bool = False
+    ) -> dict:
+        # `tta` is only passed when set, so a v1 evaluate(task, path, split) keeps working.
+        extra = {"tta": True} if tta else {}
         return importlib.import_module("gotrain.engine.train").evaluate(
-            task, checkpoint_path, split
+            task, checkpoint_path, split, **extra
+        )
+
+    def predict(
+        self, task: str, checkpoint_path: Checkpoints, images: np.ndarray, tta: bool = False
+    ) -> dict:
+        extra = {"tta": True} if tta else {}
+        return importlib.import_module("gotrain.engine.train").predict(
+            task, checkpoint_path, images, **extra
         )
 
     def describe_dataset(self, task: str) -> DatasetCard:

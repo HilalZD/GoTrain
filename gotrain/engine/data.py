@@ -48,7 +48,6 @@ FLAT_DEFINITION = (
     "a tile is nearly flat when the median over bands of (p98 - p2 of its valid pixels in that "
     f"band) / (that band's train std) is below {FLAT_THRESHOLD}"
 )
-SHORTCUT_GAP = 0.05  # flag when per-class flat shares differ by >= 5 points
 
 # Upstream errata: geo-bench README "Known issues", issues #28 and #29. The pixel data is fine,
 # but the stored band names are wrong for most channels. These are the TRUE names, in order.
@@ -96,15 +95,15 @@ NODATA_CLASSES: dict[str, int] = {"m-chesapeake": 0}
 
 DATASET_FACTS: dict[str, list[str]] = {
     "m-brick-kiln": [
-        "Kilns are small (about 100-150 m, 10-15 px of a 64 px tile) and mean NDVI is the same "
-        "for both classes (0.40 vs 0.38): the model must find small objects, not land cover.",
+        "Kilns are about 100-150 m across (10-15 px of a 64 px tile). Mean NDVI is 0.40 for "
+        "'not brick kiln' and 0.38 for 'brick kiln' tiles.",
     ],
     "m-chesapeake": [
         "Class 0 'no data' marks blank tiles (125 whole train tiles; the imagery there is all "
         "zero). It stays in training and in the official 7-class mIoU (score, comparable with "
         "GEO-Bench); metrics.json and diagnose() also report miou_excl_nodata (6 classes).",
-        "Masks have hand-drawn edges (e.g. straight barren polygons over grass): label noise "
-        "caps the IoU reachable for barren, impervious other and roads.",
+        "Some masks have hand-drawn straight edges that do not follow the image (e.g. a barren "
+        "polygon over grass in train tile #808).",
     ],
 }
 
@@ -468,6 +467,28 @@ def majority_class_baseline(
     return {"predict": class_names[major], "metric": metric, "score": round(score, 4)}
 
 
+def shortcut_card_fields(majority: dict, flat: dict) -> dict:
+    """Recon-card keys for contract request #11 (names final, agreed with Hilal).
+
+    majority_class_baseline  float: VAL score of always predicting the most common TRAIN class
+    flat_tile_fraction       {class: fraction of sampled train tiles that are flat}; classes
+                             with no sampled tile are left out
+    The rest is provenance kept next to them (what was predicted, metric, definition, sample).
+    """
+    return {
+        "majority_class_baseline": majority["score"],
+        "majority_class_baseline_detail": {
+            "predict": majority["predict"],
+            "metric": majority["metric"],
+        },
+        "flat_tile_fraction": {k: v for k, v in flat["per_class"].items() if v is not None},
+        "flat_tile_overall": flat["overall"],
+        "flat_tile_threshold": flat["threshold"],
+        "flat_tile_definition": flat["definition"],
+        "flat_tile_n": flat["n_tiles"],
+    }
+
+
 def inspect_task(
     task_name: str,
     data_dir: str | Path | None = None,
@@ -653,8 +674,7 @@ def inspect_task(
         "band_names_corrected": fixed,
         "class_names_corrected": names_fixed,
         "excluded_pixels": int(rs.excluded_pixels),
-        "majority_class_baseline": majority,
-        "flat_tile_fraction": flat,
+        **shortcut_card_fields(majority, flat),
         "example_sample": {
             "name": s0.sample_name,
             "shape_hwc": list(arr0.shape),
@@ -711,36 +731,25 @@ def _extra_notes(recon: dict) -> list[str]:
 
 
 def _shortcut_notes(recon: dict) -> list[str]:
-    """Majority-class baseline and flat-tile shares, as notes the agent can read."""
+    """Majority-class baseline and flat-tile fractions as plain facts (no advice in the card)."""
     notes = []
-    mb = recon.get("majority_class_baseline")
-    if mb:
-        what = mb["predict"] if isinstance(mb["predict"], str) else ", ".join(mb["predict"])
+    if recon.get("majority_class_baseline") is not None:
+        detail = recon.get("majority_class_baseline_detail", {})
+        what = detail.get("predict", "the most common train class")
+        what = what if isinstance(what, str) else ", ".join(what)
         notes.append(
             f"Majority-class baseline on val: always predicting '{what}' scores "
-            f"{mb['score']:.3f} {mb['metric']}. A model must clearly beat this; on imbalanced "
-            "tasks also check per-class recall in diagnose()."
-        )
-    ft = recon.get("flat_tile_fraction")
-    if ft:
-        shares = {k: v for k, v in ft["per_class"].items() if v is not None}
-        listed = sorted(shares.items(), key=lambda kv: -kv[1])[:10]
-        notes.append(
-            f"Nearly flat (low-contrast) tiles: {ft['overall']:.1%} of {ft['n_tiles']} sampled "
-            f"train tiles ({ft['definition']}). By class: "
-            + ", ".join(f"{k} {v:.1%}" for k, v in listed)
+            f"{recon['majority_class_baseline']:.3f} {detail.get('metric', '')}".rstrip()
             + "."
         )
-        if shares and max(shares.values()) - min(shares.values()) >= SHORTCUT_GAP:
-            hi = max(shares, key=shares.get)
-            lo = min(shares, key=shares.get)
-            notes.append(
-                f"Possible shortcut: flat tiles are far more common in '{hi}' "
-                f"({shares[hi]:.1%}) than in '{lo}' ({shares[lo]:.1%}). A model can score by "
-                f"learning 'flat => {hi}' instead of the task. That is legitimate if flatness is "
-                "the class (e.g. open water) and a shortcut if it comes from clouds, haze or fill; "
-                "look at the error grid and per-class recall."
-            )
+    flat = recon.get("flat_tile_fraction")
+    if flat is not None:
+        by_class = sorted(flat.items(), key=lambda kv: -kv[1])[:10]
+        notes.append(
+            f"Flat tiles ({recon.get('flat_tile_definition', 'low contrast')}): "
+            f"{recon.get('flat_tile_overall', 0):.1%} of {recon.get('flat_tile_n', '?')} sampled "
+            "train tiles; by class: " + ", ".join(f"{k} {v:.1%}" for k, v in by_class) + "."
+        )
     return notes
 
 
@@ -781,6 +790,9 @@ def to_dataset_card(recon: dict) -> DatasetCard:
         value_range=value_range,
         label_format=recon.get("label_format"),
         mask_unique_values=sorted(int(v) for v in mask["values"]) if mask else None,
+        # contract request #11 (final names); ignored by DatasetCard until Hilal adds the fields
+        majority_class_baseline=recon.get("majority_class_baseline"),
+        flat_tile_fraction=recon.get("flat_tile_fraction"),
         nodata_fraction=recon.get("nodata_fraction"),
         constant_bands=recon.get("constant_bands"),
         stats_n_samples=recon.get("stats_n_samples"),

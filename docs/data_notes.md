@@ -142,7 +142,7 @@ Measured on SageMaker (`explore.py`, seed 0, stats on 2,000 train images; figure
 - **Values:** reflectance bands have train means 570 (B01) to 2,069 (B8A); the TCI channels are 8-bit rendered RGB (means 68-89, p99 130-199), so scales differ ~28x (TCI_B vs B11): per-band normalisation is mandatory.
 - **Nodata:** 0%; no constant bands; no duplicates or train/val leaks found.
 - **Class-name check:** names match as far as the eye can tell at 10 m. Several "brick kiln" tiles show reddish rectangular brick yards; "not brick kiln" tiles are rivers, fields, forest and villages; no sign of swapped labels. Mean NDVI is the same for both classes (0.40 vs 0.38): kilns are small objects (10-15 px), not a land-cover type.
-- **Shortcut:** flat tiles are 10.8% of "not brick kiln" and 0.0% of "brick kiln" (one-off check on 1,500 train tiles). Card notes carry this plus the majority baseline and the advice to judge by kiln-class F1/recall.
+- **Shortcut (automatic since request #11):** `flat_tile_fraction` = **13.8% of "not brick kiln" vs 0.0% of "brick kiln"** (9.1% overall, on the 2,000-tile seeded stats sample). `majority_class_baseline` = **0.664** val accuracy (663 of 999 val tiles are "not brick kiln"). Both are in the card and its notes, as facts.
 
 ### m-chesapeake (segmentation)
 Measured on SageMaker (`explore.py`, seed 0, stats on 2,000 train images; figure `m-chesapeake_samples.png`):
@@ -229,70 +229,12 @@ How to read it:
     - GEO-Bench's converter lists the names starting at "water" with "no-data" LAST. That is off by one, which is why the names can't be taken from there.
 
     Fixed with `CLASS_NAME_FIXES["m-chesapeake"]`. **Decision (#9):** class 0 stays in training and in the official 7-class mIoU (`score`, comparable with GEO-Bench baselines). `metrics.json` and `diagnose()` add `miou_excl_nodata`: mIoU over the 6 real classes with no-data-truth pixels removed (`NODATA_CLASSES`). The sample figure was drawn before the fix, so its legend still says 0-6.
-23. **m-brick-kiln: accuracy is misleading.** The majority class ("not brick kiln") is 66.4% of train, so always predicting it scores 66.4%. On top of that, almost-flat tiles (water, cloud, haze or fill; B04 2-98% spread < 50 DN) are 10.8% of not-kiln tiles and 0.0% of kiln tiles: "flat tile => not kiln" is a free shortcut. **Report F1 / recall of "brick kiln"** (diagnose()'s per-class recall shows it) next to accuracy. The flat tiles are what look like colour static in `m-brick-kiln_samples.png`. That grid shows 4 of 8, which is very unlikely at a 7-11% rate (< 1% probability), and the grid picks tiles uniformly at random (`rng.choice`, seed 0), so it is not a selection bias. More likely the 2-98% stretch also turns tiles with spreads somewhat above 50 DN into static, i.e. the near-flat share is larger than the < 50 DN count. Worth re-measuring with a higher threshold (e.g. < 150 DN) on SageMaker.
+23. **m-brick-kiln: accuracy is misleading.** The majority class ("not brick kiln") is 66.4% of train, so always predicting it scores 66.4%. On top of that, almost-flat tiles (water, cloud, haze or fill; B04 2-98% spread < 50 DN) are 10.8% of not-kiln tiles and 0.0% of kiln tiles: "flat tile => not kiln" is a free shortcut. **Report F1 / recall of "brick kiln"** (diagnose()'s per-class recall shows it) next to accuracy. The flat tiles are what look like colour static in `m-brick-kiln_samples.png`. That grid shows 4 of 8, which is very unlikely at a 7-11% rate (< 1% probability), and the grid picks tiles uniformly at random (`rng.choice`, seed 0), so it is not a selection bias. More likely the 2-98% stretch also turns tiles with spreads somewhat above 50 DN into static, i.e. the near-flat share is larger than the < 50 DN count. **Re-measured (request #11)** with a unit-free definition (gotcha 27): 13.8% of not-kiln tiles are flat, versus 10.8% with the 50 DN cut, and still 0.0% of kiln tiles.
 24. **m-chesapeake has duplicates: 20 val images are byte-identical to a train image** (and 75 duplicates inside the sampled train set). Validation scores are slightly optimistic; the test split was not checked (and must not be).
 25. **Task name is `m-chesapeake`, not `m-chesapeake-landcover`.** That's the Hugging Face zip name and the folder it unzips into; the engine finds tasks by folder name. **Decision (#10):** we use `m-chesapeake` everywhere; Hilal switches the fake engine and docs.
 26. **m-brick-kiln is stored as float64** (eurosat is int16). Same values, 4x the memory: cast to float32 before caching arrays. GeoBenchDataset already returns float32.
-
----
-
-## 6. Satellite imagery primer (for us, and for the slides)
-
-### What a "band" is
-A normal photo records 3 colours: red, green and blue light. A satellite sensor records **many narrow slices of the light spectrum**, including light humans can't see. Each slice is a **band**: one grayscale image of how much light of that wavelength the ground reflected. Stack them and every pixel becomes a vector of reflectances, a "spectral signature". Vegetation, water, soil and concrete each have characteristic signatures, which is why extra bands help.
-
-### Sentinel-2 (m-eurosat, m-brick-kiln, and other tasks)
-ESA's Sentinel-2 satellites carry the MSI sensor with 13 bands:
-
-| Band | Name | Wavelength | Native res. | What it's good for |
-|---|---|---|---|---|
-| B01 | Coastal aerosol | 443 nm | 60 m | Haze and aerosols; little ground detail |
-| B02 | Blue | 490 nm | 10 m | True colour; water, atmosphere |
-| B03 | Green | 560 nm | 10 m | True colour; vegetation vigour |
-| B04 | Red | 665 nm | 10 m | True colour; chlorophyll absorbs red, so vegetation looks dark here |
-| B05 | Red edge 1 | 705 nm | 20 m | Plant stress and chlorophyll content |
-| B06 | Red edge 2 | 740 nm | 20 m | Same, deeper into the red edge |
-| B07 | Red edge 3 | 783 nm | 20 m | Same |
-| B08 | NIR | 842 nm | 10 m | Healthy leaves reflect near-infrared strongly; key for vegetation (NDVI) |
-| B8A | Narrow NIR | 865 nm | 20 m | Cleaner NIR, less water-vapour contamination |
-| B09 | Water vapour | 945 nm | 60 m | Atmospheric water; mostly for correction |
-| B10 | SWIR cirrus | 1375 nm | 60 m | Detects thin high clouds; very low values over land |
-| B11 | SWIR 1 | 1610 nm | 20 m | Moisture in soil and plants; snow vs. cloud |
-| B12 | SWIR 2 | 2190 nm | 20 m | Moisture, minerals, burned areas |
-
-Pixel values are reflectance scaled by 10,000, so roughly 0–10,000 (bright clouds or snow can exceed it). They're stored as integers. "Native res." is the sensor's ground size per pixel; the dataset may have resampled everything to 10 m.
-
-The "red edge" is the steep jump in plant reflectance between red (absorbed) and NIR (reflected). Its exact position shifts with plant health, which is why Sentinel-2 has three bands there.
-
-### Aerial RGB (m-pv4ger, m-pv4ger-seg)
-These come from a camera on a plane, not a satellite: 3 bands (red, green, blue) at **0.1 m per pixel**. That's 100× finer than Sentinel-2's 10 m, which is why individual rooftop solar panels are visible. Values are ordinary 0–255 photo intensities. These look like normal photos, so ImageNet-pretrained networks transfer well to them.
-
-### Why raw pixel values can't go straight into a pretrained network
-- **Scale mismatch.** Pretrained networks learned from inputs normalised to roughly mean 0 and std 1, using ImageNet statistics on 0–1 images. Raw Sentinel-2 values are in the thousands. Fed in directly, early activations explode, and batch-norm statistics and pretrained filters become meaningless. Training is unstable or doesn't learn.
-- **Bands live on different scales.** B10 (cirrus) is often near 0 over land while B08 (NIR) is in the thousands. In brick-kiln, three channels are 0–255 next to reflectance bands up to ~10,000. Without per-band standardisation, the largest-valued bands dominate the gradients and the small ones are effectively ignored. That's why we compute mean/std **per band**, not one global number.
-- **Channel count and meaning.** ImageNet models expect exactly 3 channels in RGB order. With 13 bands, the first convolution must be adapted (for example, copy the RGB weights to B04/B03/B02 and initialise the rest), or use weights pretrained on Sentinel-2. Even for 3 channels, the order must match what the model learned (RGB, not BGR).
-- **Integer dtypes.** int16 and uint8 arrays must be cast to float32 first.
-
-### Why normalisation statistics must come from the train split only
-Mean and std are numbers we **learn from data**, exactly like model weights. If we compute them using validation or test images, information about those held-out images leaks into the preprocessing. The model is then evaluated on data that partly shaped its inputs. That makes scores optimistic and breaks the purpose of held-out data: estimating performance on images we have never seen. In production, the stats are frozen from training data and applied unchanged to new images, so evaluation must mimic that. Using test data here would also break the hackathon's strict rule: the test split is touched once, at the end, with the final model.
-
----
-
-## 7. How this was tested (before touching real data)
-
-The workspace that wrote these scripts couldn't reach Hugging Face, so the real data was **not** downloaded there. Instead:
-- The download mechanism was verified against geobench 1.1.0's source and the live Hugging Face file listing.
-- Three fake tasks were built **with geobench's own writer**, so the on-disk format is identical:
-  - a 13-band Sentinel-2 "m-eurosat" with the upstream mislabelled band names, class imbalance, an exact duplicate, a train/val leak and nodata corners;
-  - a binary aerial "m-pv4ger-seg";
-  - a 4-band, 7-class segmentation task with an ignore value 255 and a class that never appears.
-- The test-split files were **deliberately corrupted**, so any read of the test split would crash. None did.
-- Every planted problem was detected and reported in `notes`.
-- The streaming mean/std was checked against a direct NumPy computation over all pixels: max difference < 1e-6.
-- `_open_split(task, "test")` raises `PermissionError`.
-
-## 8. Next steps
-1. Run the quick start on SageMaker and paste the `explore.py` output here (fill the _TO FILL_ sections).
-2. Look at `docs/figures/*_samples.png`. Do eurosat tiles look like real landscapes, and do the panel masks sit on panels?
-3. Commit `scratch/`, `stats/`, `docs/` to `serena/data` and push, so `train.py` can read `stats/<task>.json`.
-4. Re-run `explore.py` on our other two tasks once they're downloaded (no code changes needed).
+27. **Flat tiles and the majority baseline are measured for every task (request #11).** `describe_dataset()` reports `majority_class_baseline` (float: VAL score of always predicting the most common TRAIN class, official metric) and `flat_tile_fraction` (class -> share of flat sampled train tiles). **Flat:** the median over bands of (p98 − p2 of the tile's valid pixels in that band) / (that band's train std) is below **0.25**. The threshold was picked from data: contrast is bimodal on eurosat (5% of tiles < 0.06, 90% > 0.5) and on brick-kiln (5% < 0.08, 90% > 0.47). Values:
+    - m-eurosat: baseline 0.100 accuracy; flat 7.7% overall, almost all "Sea and Lake" (75%), Forest 1.5%, every other class 0%.
+    - m-brick-kiln: baseline 0.664 accuracy; flat "not brick kiln" 13.8%, "brick kiln" 0.0%. Computed on the laptop from a partial extract (the seeded 2,000 train tiles + 999 val tiles) because the full unzip didn't fit.
+    - m-pv4ger-seg: baseline 0.400 mIoU; no flat tiles.
+    - m-chesapeake: not computed yet; needs a re-run of `scratch/explore.py` on SageMaker.

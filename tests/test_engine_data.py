@@ -223,13 +223,15 @@ def test_chesapeake_class_names_are_corrected():
     assert fixed and names == card.class_names
 
 
-def test_brick_kiln_card_warns_about_accuracy():
+def test_brick_kiln_card_reports_baseline_and_flat_shortcut_facts():
     from gotrain.engine.combos import check_combo
 
-    card = data.to_dataset_card(recon("m-brick-kiln"))
-    assert "always predicting 'not brick kiln' already scores 66.4%" in card.notes
-    assert "F1/recall of 'brick kiln'" in card.notes
-    assert "Shortcut warning" in card.notes and "10.8%" in card.notes
+    rec = recon("m-brick-kiln")
+    assert rec["majority_class_baseline"] == pytest.approx(0.6637, abs=1e-4)
+    assert rec["flat_tile_fraction"] == {"not brick kiln": 0.1378, "brick kiln": 0.0}
+    card = data.to_dataset_card(rec)
+    assert "always predicting 'not brick kiln' scores 0.664 accuracy" in card.notes
+    assert "by class: not brick kiln 13.8%, brick kiln 0.0%" in card.notes
     assert "zero-filled (missing here): B06, B09, B10" in card.notes
     assert check_combo(card, "resnet50", "ssl4eo_s2") is None  # sensor reads as Sentinel-2
 
@@ -285,18 +287,21 @@ def test_flat_tile_fraction_per_class():
 
 
 def test_eurosat_card_reports_baseline_and_flat_water():
-    card = data.to_dataset_card(recon("m-eurosat"))
+    rec = recon("m-eurosat")
+    assert rec["majority_class_baseline"] == pytest.approx(0.1)
+    assert rec["flat_tile_fraction"]["Sea and Lake"] == pytest.approx(0.75)
+    card = data.to_dataset_card(rec)
     assert "Majority-class baseline on val" in card.notes and "0.100 accuracy" in card.notes
-    assert "Nearly flat (low-contrast) tiles" in card.notes
-    assert "Possible shortcut: flat tiles are far more common in 'Sea and Lake'" in card.notes
+    assert "Flat tiles (a tile is nearly flat when" in card.notes
+    assert "by class: Sea and Lake 75.0%" in card.notes
 
 
 def test_pv4ger_card_has_no_flat_tiles_and_a_miou_baseline():
     rec = recon("m-pv4ger-seg")
-    assert rec["majority_class_baseline"]["metric"] == "miou"
-    assert rec["majority_class_baseline"]["score"] == pytest.approx(0.40, abs=0.01)
-    assert rec["flat_tile_fraction"]["overall"] == 0.0
-    assert "Possible shortcut" not in data.to_dataset_card(rec).notes
+    assert rec["majority_class_baseline_detail"]["metric"] == "miou"
+    assert rec["majority_class_baseline"] == pytest.approx(0.40, abs=0.01)
+    assert rec["flat_tile_overall"] == 0.0
+    assert set(rec["flat_tile_fraction"].values()) == {0.0}
 
 
 def test_cards_without_the_new_fields_still_work():
@@ -326,4 +331,27 @@ def test_agent_discovers_shortcut_notes_through_its_own_tool(monkeypatch):
     out = inspect_dataset("m-eurosat")
     notes = out["dataset"]["notes"]
     assert "Majority-class baseline on val" in notes
-    assert "Possible shortcut" in notes and "Sea and Lake" in notes
+    assert "Flat tiles" in notes and "Sea and Lake 75.0%" in notes
+
+
+def test_card_notes_for_the_new_fields_are_facts_only():
+    """Hilal (#11): facts only, no recipe or advice in the card."""
+    notes = data._shortcut_notes(recon("m-brick-kiln"))
+    assert len(notes) == 2
+    for word in ("should", "must", "consider", "use ", "shortcut", "recall"):
+        assert all(word not in n.lower() for n in notes), word
+
+
+def test_shortcut_card_fields_use_the_final_names():
+    fields = data.shortcut_card_fields(
+        {"predict": "a", "metric": "accuracy", "score": 0.7},
+        {
+            "definition": "d",
+            "threshold": 0.25,
+            "n_tiles": 10,
+            "overall": 0.1,
+            "per_class": {"a": 0.2, "b": None},
+        },
+    )
+    assert fields["majority_class_baseline"] == 0.7
+    assert fields["flat_tile_fraction"] == {"a": 0.2}

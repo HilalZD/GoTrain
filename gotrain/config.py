@@ -24,6 +24,7 @@ class Settings(BaseSettings):
         default="eu.anthropic.claude-sonnet-5-5", validation_alias="BEDROCK_MODEL_ID"
     )
     aws_region: str = Field(default="eu-central-1", validation_alias="AWS_REGION")
+    fake_sleep_s: float = Field(default=1.0, ge=0.0, validation_alias="GOTRAIN_FAKE_SLEEP_S")
 
     @model_validator(mode="after")
     def _s3_needs_bucket(self) -> "Settings":

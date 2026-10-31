@@ -29,14 +29,27 @@ At the end, each task's best model is registered and scored once on TEST.
 - Use type hints and small, readable functions. Every tool gets a test. Keep the code ruff-clean
   (`make lint`).
 - **Humans fix bugs in tools. Humans never pick hyperparameters for agent runs.**
+- **Tools never raise to the agent.** Wrap every tool in `@tool` (`gotrain/tools/_common.py`):
+  failures come back as `{"error", "hint"}`, and every output carries `"budget"`.
+- Tools touch files only through `get_storage()` and storage keys, never raw paths.
 - The audit logger is `gotrain/audit.py`. Never add a `logging.py`, because it would shadow
   the stdlib module.
+
+## State on disk (under GOTRAIN_HOME)
+
+```
+runs/<task>/<run_id>/          config.json, result.json, git_commit, checkpoints/
+registry/<task>/leaderboard.jsonl, budget.json, v1/, v2/ ..., TEST_LOCK.json
+memory/lessons.md
+```
+
+`run_id` = `<task>-<YYYYmmdd-HHMMSS>-<4 hex>`.
 
 ## Environment
 
 - Settings come from env vars only (`gotrain/config.py`): `GOTRAIN_ENGINE` (fake|real),
   `GOTRAIN_STORAGE` (local|s3), `GOTRAIN_BUCKET`, `GEO_BENCH_DIR`, `GOTRAIN_HOME`,
-  `GOTRAIN_STATS_DIR`, `BEDROCK_MODEL_ID`, `AWS_REGION`.
+  `GOTRAIN_STATS_DIR`, `BEDROCK_MODEL_ID`, `AWS_REGION`, `GOTRAIN_FAKE_SLEEP_S`.
 - Get an engine with `gotrain.engine.get_engine()`, never by importing a concrete engine.
   The default is the fake engine, so everything runs without a GPU.
 - **ML libraries are an optional extra (`.[ml]`) with no version pins.** On SageMaker, run

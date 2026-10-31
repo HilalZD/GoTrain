@@ -163,6 +163,8 @@ WEIGHTS_BONUS = {"none": -0.08, "imagenet": 0.0}
 AUGMENT_BONUS = {"rot90": 0.012, "flip": 0.008, "color_jitter": -0.004}
 SETUP_MINUTES = 0.2
 BEST_LOG10_LR = -3.3
+OVERFIT_START = 20  # epochs; runs without augmentation start losing val score after this
+OVERFIT_RATE = 0.0015
 
 
 def config_seed(config: TrainConfig) -> int:
@@ -202,11 +204,17 @@ def _clip(x: float) -> float:
 
 
 def make_history(
-    target: float, epochs: int, per_epoch_min: float, rng: random.Random
+    target: float,
+    epochs: int,
+    per_epoch_min: float,
+    rng: random.Random,
+    overfit_rate: float = 0.0,
 ) -> list[EpochRecord]:
+    """Rising val curve; past OVERFIT_START epochs it decays by overfit_rate per epoch."""
     history = []
     for e in range(1, epochs + 1):
         val = target * (1 - 0.35 * math.exp(-e / 8)) + rng.gauss(0, 0.004)
+        val -= overfit_rate * max(0, e - OVERFIT_START)
         loss = 0.15 + 1.6 * math.exp(-e / 5) + abs(rng.gauss(0, 0.02))
         elapsed = (SETUP_MINUTES + e * per_epoch_min) * 60
         history.append(
@@ -218,6 +226,37 @@ def make_history(
             )
         )
     return history
+
+
+def fake_confusion(
+    card: DatasetCard, score: float, rng: random.Random
+) -> tuple[dict[str, dict[str, float]], list[list[float]]]:
+    """Per-class scores (rare classes do worse) and a row-normalised confusion matrix."""
+    key = "iou" if card.task_type == "segmentation" else "recall"
+    top = max(card.class_distribution.values())
+    per_class, matrix = {}, []
+    for i, name in enumerate(card.class_names):
+        rarity = 1 - card.class_distribution.get(name, top) / top
+        s = _clip(score - 0.2 * rarity**2 + rng.uniform(-0.04, 0.04))
+        per_class[name] = {key: round(s, 3)}
+        weights = [0.0 if j == i else rng.random() ** 3 for j in range(card.n_classes)]
+        total = sum(weights) or 1.0
+        matrix.append(
+            [round(s if j == i else (1 - s) * w / total, 3) for j, w in enumerate(weights)]
+        )
+    return per_class, matrix
+
+
+def curve_verdict(history: list[EpochRecord]) -> str:
+    """'overfitting' if val peaked early and fell; 'underfitting' if still climbing."""
+    scores = [h.val_score or 0.0 for h in history]
+    n = len(scores)
+    best_epoch = scores.index(max(scores)) + 1
+    if best_epoch < 0.75 * n and scores[-1] < max(scores) - 0.01:
+        return "overfitting"
+    if n < 5 or scores[-1] - scores[int(0.8 * n) - 1] > 0.01:
+        return "underfitting"
+    return "fine"
 
 
 class FakeEngine:
@@ -252,9 +291,10 @@ class FakeEngine:
                 error="budget too small for one epoch",
             )
 
-        history = make_history(target_score(config, card, rng), epochs, per_epoch, rng)
+        overfit = 0.0 if config.augment else OVERFIT_RATE
+        history = make_history(target_score(config, card, rng), epochs, per_epoch, rng, overfit)
         best = max(h.val_score for h in history)
-        checkpoint = self._write_checkpoint(run_dir, config, best)
+        checkpoint = self._write_checkpoint(run_dir, config, best, history)
         return TrainResult(
             run_id=run_id,
             task=config.task,
@@ -282,6 +322,27 @@ class FakeEngine:
             raise ValueError(f"unknown task {task!r}; known: {sorted(CARDS)}")
         return CARDS[task].model_copy(deep=True)
 
+    def diagnose(self, task: str, run_dir: Path) -> dict:
+        path = Path(run_dir) / "checkpoints" / "best.ckpt"
+        if not path.exists():
+            raise FileNotFoundError(f"no checkpoint in {run_dir}; only finished runs have one")
+        ckpt = json.loads(path.read_text(encoding="utf-8"))
+        if ckpt["task"] != task:
+            raise ValueError(f"run is for {ckpt['task']!r}, not {task!r}")
+        card = CARDS[task]
+        rng = random.Random(ckpt["seed"] + 1)
+        per_class, matrix = fake_confusion(card, ckpt["val_score"], rng)
+        history = [EpochRecord(**h) for h in ckpt["history"]]
+        return {
+            "task": task,
+            "metric_name": ckpt["metric_name"],
+            "class_names": card.class_names,
+            "per_class": per_class,
+            "confusion_matrix": matrix,
+            "curve_verdict": curve_verdict(history),
+            "error_grid_path": None,
+        }
+
     @staticmethod
     def _config_problem(config: TrainConfig, card: DatasetCard | None) -> str | None:
         if card is None:
@@ -293,7 +354,9 @@ class FakeEngine:
         return None
 
     @staticmethod
-    def _write_checkpoint(run_dir: Path, config: TrainConfig, val_score: float) -> Path:
+    def _write_checkpoint(
+        run_dir: Path, config: TrainConfig, val_score: float, history: list[EpochRecord]
+    ) -> Path:
         path = run_dir / "checkpoints" / "best.ckpt"
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -303,6 +366,7 @@ class FakeEngine:
             "metric_name": metric_for(CARDS[config.task]),
             "val_score": val_score,
             "config": config.model_dump(mode="json"),
+            "history": [h.model_dump() for h in history],
         }
         path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         return path

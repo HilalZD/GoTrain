@@ -5,10 +5,13 @@ Any engine (fake or real) provides three methods:
     train(config, budget_minutes, run_dir) -> TrainResult   scored on VALIDATION
     evaluate(task, checkpoint_path, split) -> dict   keys: task, split, metric_name, score
     describe_dataset(task) -> DatasetCard   built from train/val only
+    diagnose(task, run_dir) -> dict   keys: per_class, confusion_matrix,
+                                      curve_verdict ("overfitting"|"underfitting"|"fine"),
+                                      error_grid_path (optional)
 
 The real engine is assembled from Serena's modules, imported lazily so this repo
 works before they exist:
-    gotrain.engine.train  must define  train(...) and evaluate(...)
+    gotrain.engine.train  must define  train(...), evaluate(...) and diagnose(...)
     gotrain.engine.data   must define  describe_dataset(...)
 
 Only gotrain/tools/final_test.py may ask evaluate() for the test split.
@@ -32,6 +35,8 @@ class Engine(Protocol):
 
     def describe_dataset(self, task: str) -> DatasetCard: ...
 
+    def diagnose(self, task: str, run_dir: Path) -> dict: ...
+
 
 class RealEngine:
     """Thin adapter over Serena's modules; nothing heavy is imported until a call."""
@@ -49,13 +54,17 @@ class RealEngine:
     def describe_dataset(self, task: str) -> DatasetCard:
         return importlib.import_module("gotrain.engine.data").describe_dataset(task)
 
+    def diagnose(self, task: str, run_dir: Path) -> dict:
+        return importlib.import_module("gotrain.engine.train").diagnose(task, run_dir)
+
 
 def get_engine() -> Engine:
     """Return the engine selected by GOTRAIN_ENGINE ("fake" by default)."""
-    if get_settings().engine == "fake":
+    settings = get_settings()
+    if settings.engine == "fake":
         from gotrain.engine.fake import FakeEngine
 
-        return FakeEngine()
+        return FakeEngine(sleep_s=settings.fake_sleep_s)
     missing = [m for m in REAL_MODULES if importlib.util.find_spec(m) is None]
     if missing:
         raise RuntimeError(

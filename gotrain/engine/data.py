@@ -38,6 +38,16 @@ GEOBENCH_SPLITS = {"train": "train", "val": "valid", TEST_SPLIT: TEST_SPLIT}
 IGNORE_INDEX = -100  # mask pixels outside [0, n_classes); torch's cross-entropy default
 NODATA_RULE = "pixels where every band is exactly 0, plus NaN/inf values"
 NEARLY_EMPTY_RATIO = 0.01  # a band whose p99 is <1% of the largest band's p99
+# Flat (low-contrast) tiles. A tile's contrast is the MEDIAN over bands of
+# (p98 - p2 of the tile's valid pixels in that band) / (that band's TRAIN std): unit-free, so it
+# works for reflectance, 8-bit and 0-1 data, and one odd band (e.g. near-empty B10) can't decide.
+# Chosen from data: m-eurosat's contrast is bimodal (5% of tiles < 0.06, 90% > 0.5); 0.25 sits in
+# the gap. For brick-kiln's B04 it is ~90 DN, above the 50 DN that undercounted (gotcha 23).
+FLAT_THRESHOLD = 0.25
+FLAT_DEFINITION = (
+    "a tile is nearly flat when the median over bands of (p98 - p2 of its valid pixels in that "
+    f"band) / (that band's train std) is below {FLAT_THRESHOLD}"
+)
 
 # Upstream errata: geo-bench README "Known issues", issues #28 and #29. The pixel data is fine,
 # but the stored band names are wrong for most channels. These are the TRUE names, in order.
@@ -85,19 +95,15 @@ NODATA_CLASSES: dict[str, int] = {"m-chesapeake": 0}
 
 DATASET_FACTS: dict[str, list[str]] = {
     "m-brick-kiln": [
-        "Shortcut warning: almost-flat tiles (water, cloud, haze or fill; B04 2-98% spread < 50 "
-        "DN) are 10.8% of 'not brick kiln' train tiles and 0.0% of 'brick kiln' ones (CPU check "
-        "on 1,500 random train tiles, 2026-10-31). 'Flat tile => not kiln' is a free win that "
-        "inflates accuracy without detecting kilns.",
-        "Kilns are small (about 100-150 m, 10-15 px of a 64 px tile) and mean NDVI is the same "
-        "for both classes (0.40 vs 0.38): the model must find small objects, not land cover.",
+        "Kilns are about 100-150 m across (10-15 px of a 64 px tile). Mean NDVI is 0.40 for "
+        "'not brick kiln' and 0.38 for 'brick kiln' tiles.",
     ],
     "m-chesapeake": [
         "Class 0 'no data' marks blank tiles (125 whole train tiles; the imagery there is all "
         "zero). It stays in training and in the official 7-class mIoU (score, comparable with "
         "GEO-Bench); metrics.json and diagnose() also report miou_excl_nodata (6 classes).",
-        "Masks have hand-drawn edges (e.g. straight barren polygons over grass): label noise "
-        "caps the IoU reachable for barren, impervious other and roads.",
+        "Some masks have hand-drawn straight edges that do not follow the image (e.g. a barren "
+        "polygon over grass in train tile #808).",
     ],
 }
 
@@ -386,6 +392,103 @@ def _scale_note(bands: list[str], p99: np.ndarray, notes: list[str]) -> None:
         )
 
 
+def tile_spread(arr_hwc: np.ndarray) -> np.ndarray:
+    """Per-band p98 - p2 over the tile's valid pixels (nodata and NaN/inf excluded); NaN if none."""
+    x = arr_hwc.reshape(-1, arr_hwc.shape[-1]).astype(np.float64)
+    x = x[np.isfinite(x).all(axis=1) & ~np.all(x == 0, axis=1)]
+    if len(x) == 0:
+        return np.full(arr_hwc.shape[-1], np.nan)
+    return np.percentile(x, 98, axis=0) - np.percentile(x, 2, axis=0)
+
+
+def tile_classes(label: Any, kind: str, n_classes: int) -> list[int]:
+    """Classes present in one tile: its label (classification), its positive labels
+    (multilabel), or the classes with at least one pixel (segmentation)."""
+    lab = np.asarray(label)
+    if kind == "segmentation":
+        return [int(v) for v in np.unique(lab) if 0 <= v < n_classes]
+    if kind == "multilabel":
+        return [int(c) for c in np.flatnonzero(lab)]
+    return [int(lab)]
+
+
+def flat_tile_fraction(
+    spreads: np.ndarray, std: np.ndarray, classes: list[list[int]], class_names: list[str]
+) -> dict:
+    """Share of sampled train tiles that are nearly flat, overall and per class (see
+    FLAT_DEFINITION). A tile with no valid pixel at all counts as flat."""
+    safe_std = np.where(np.asarray(std) > 1e-6, std, np.nan)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        contrast = np.nanmedian(spreads / safe_std, axis=1)
+    flat = ~(contrast >= FLAT_THRESHOLD)  # NaN (all-nodata tile) counts as flat
+    per_class = {}
+    for c, name in enumerate(class_names):
+        members = np.array([c in cl for cl in classes], dtype=bool)
+        per_class[name] = round(float(flat[members].mean()), 4) if members.any() else None
+    return {
+        "definition": FLAT_DEFINITION,
+        "threshold": FLAT_THRESHOLD,
+        "n_tiles": int(len(flat)),
+        "overall": round(float(flat.mean()), 4) if len(flat) else 0.0,
+        "per_class": per_class,
+    }
+
+
+def majority_class_baseline(
+    kind: str, train_counts: Counter, val_counts: Counter, n_val: int, class_names: list[str]
+) -> dict:
+    """Score on VAL of always predicting the most common TRAIN class, with the official metric.
+
+    classification: accuracy = share of val samples in that class.
+    segmentation:   mIoU as in contract v2: the majority class gets IoU = its share of valid val
+                    pixels, every other class present in val gets IoU 0, classes absent from val
+                    are skipped.
+    multilabel:     micro-F1 of predicting every label that is positive in >= 50% of train images.
+    """
+    k = len(class_names)
+    major = max(range(k), key=lambda c: train_counts.get(c, 0))
+    if kind == "multilabel":
+        n_train = max(train_counts.get("_n", 0), 1)
+        on = [c for c in range(k) if train_counts.get(c, 0) / n_train >= 0.5]
+        tp = sum(val_counts.get(c, 0) for c in on)
+        fp = sum(n_val - val_counts.get(c, 0) for c in on)
+        fn = sum(val_counts.get(c, 0) for c in range(k) if c not in on)
+        score = 2 * tp / max(2 * tp + fp + fn, 1)
+        return {"predict": [class_names[c] for c in on], "metric": "f1", "score": round(score, 4)}
+    if kind == "segmentation":
+        valid = sum(val_counts.get(c, 0) for c in range(k))
+        present = [c for c in range(k) if val_counts.get(c, 0) > 0 or c == major]
+        score = (val_counts.get(major, 0) / max(valid, 1)) / max(len(present), 1)
+        metric = "miou"
+    else:
+        score = val_counts.get(major, 0) / max(n_val, 1)
+        metric = "accuracy"
+    return {"predict": class_names[major], "metric": metric, "score": round(score, 4)}
+
+
+def shortcut_card_fields(majority: dict, flat: dict) -> dict:
+    """Recon-card keys for contract request #11 (names final, agreed with Hilal).
+
+    majority_class_baseline  float: VAL score of always predicting the most common TRAIN class
+    flat_tile_fraction       {class: fraction of sampled train tiles that are flat}; classes
+                             with no sampled tile are left out
+    The rest is provenance kept next to them (what was predicted, metric, definition, sample).
+    """
+    return {
+        "majority_class_baseline": majority["score"],
+        "majority_class_baseline_detail": {
+            "predict": majority["predict"],
+            "metric": majority["metric"],
+        },
+        "flat_tile_fraction": {k: v for k, v in flat["per_class"].items() if v is not None},
+        "flat_tile_overall": flat["overall"],
+        "flat_tile_threshold": flat["threshold"],
+        "flat_tile_definition": flat["definition"],
+        "flat_tile_n": flat["n_tiles"],
+    }
+
+
 def inspect_task(
     task_name: str,
     data_dir: str | Path | None = None,
@@ -470,10 +573,14 @@ def inspect_task(
     train_hashes: dict[str, int] = {}
     dup_train = 0
     dtypes = set()
+    spreads, sample_classes = [], []
     for i in rng.choice(n_train, size=n_stats, replace=False):
-        arr, _, _ = sample_array(ds_train[int(i)])
+        sample = ds_train[int(i)]
+        arr, _, _ = sample_array(sample)
         dtypes.add(str(arr.dtype))
         rs.update(arr)
+        spreads.append(tile_spread(arr))
+        sample_classes.append(tile_classes(label_value(sample.label), kind, n_classes))
         h = hashlib.md5(np.ascontiguousarray(arr).tobytes()).hexdigest()
         dup_train += h in train_hashes
         train_hashes[h] = int(i)
@@ -517,6 +624,12 @@ def inspect_task(
             "train.py must handle them."
         )
     _scale_note(bands, p99, notes)
+    flat = flat_tile_fraction(np.asarray(spreads), std, sample_classes, class_names)
+    train_counts = Counter(counts)
+    train_counts["_n"] = n_train
+    majority = majority_class_baseline(
+        kind, train_counts, _label_counts(ds_val, kind), n_val, class_names
+    )
     if n_train < 1000:
         notes.append(f"small train set ({n_train}): prefer pretrained backbones and augmentation.")
 
@@ -561,6 +674,7 @@ def inspect_task(
         "band_names_corrected": fixed,
         "class_names_corrected": names_fixed,
         "excluded_pixels": int(rs.excluded_pixels),
+        **shortcut_card_fields(majority, flat),
         "example_sample": {
             "name": s0.sample_name,
             "shape_hwc": list(arr0.shape),
@@ -609,19 +723,33 @@ def _extra_notes(recon: dict) -> list[str]:
         recon["task_type"], "samples"
     )
     notes.append(f"class_distribution = fraction of train {unit}.")
-    if recon["task_type"] == "classification" and recon["class_distribution"]:
-        dist = {k: v["pct"] for k, v in recon["class_distribution"].items()}
-        major = max(dist, key=dist.get)
-        if dist[major] >= 60:
-            minor = min(dist, key=dist.get)
-            notes.append(
-                f"Majority baseline: always predicting '{major}' already scores "
-                f"{dist[major]:.1f}% accuracy. Judge models by F1/recall of '{minor}', not only "
-                "accuracy."
-            )
+    notes.extend(_shortcut_notes(recon))
     notes.extend(DATASET_FACTS.get(recon["task"], []))
     if recon.get("excluded_pixels"):
         notes.append(f"{recon['excluded_pixels']} sampled train pixels excluded from stats.")
+    return notes
+
+
+def _shortcut_notes(recon: dict) -> list[str]:
+    """Majority-class baseline and flat-tile fractions as plain facts (no advice in the card)."""
+    notes = []
+    if recon.get("majority_class_baseline") is not None:
+        detail = recon.get("majority_class_baseline_detail", {})
+        what = detail.get("predict", "the most common train class")
+        what = what if isinstance(what, str) else ", ".join(what)
+        notes.append(
+            f"Majority-class baseline on val: always predicting '{what}' scores "
+            f"{recon['majority_class_baseline']:.3f} {detail.get('metric', '')}".rstrip()
+            + "."
+        )
+    flat = recon.get("flat_tile_fraction")
+    if flat is not None:
+        by_class = sorted(flat.items(), key=lambda kv: -kv[1])[:10]
+        notes.append(
+            f"Flat tiles ({recon.get('flat_tile_definition', 'low contrast')}): "
+            f"{recon.get('flat_tile_overall', 0):.1%} of {recon.get('flat_tile_n', '?')} sampled "
+            "train tiles; by class: " + ", ".join(f"{k} {v:.1%}" for k, v in by_class) + "."
+        )
     return notes
 
 
@@ -662,6 +790,9 @@ def to_dataset_card(recon: dict) -> DatasetCard:
         value_range=value_range,
         label_format=recon.get("label_format"),
         mask_unique_values=sorted(int(v) for v in mask["values"]) if mask else None,
+        # contract request #11 (final names); ignored by DatasetCard until Hilal adds the fields
+        majority_class_baseline=recon.get("majority_class_baseline"),
+        flat_tile_fraction=recon.get("flat_tile_fraction"),
         nodata_fraction=recon.get("nodata_fraction"),
         constant_bands=recon.get("constant_bands"),
         stats_n_samples=recon.get("stats_n_samples"),
@@ -676,6 +807,118 @@ def describe_dataset(task: str) -> DatasetCard:
     else:
         recon = inspect_task(task)  # raises FileNotFoundError for unknown/undownloaded tasks
     return to_dataset_card(recon)
+
+
+# ---------------------------------------------------------------------------------------------
+# 2d. One-time .npy cache of TRAIN and VAL (never the test split)
+# ---------------------------------------------------------------------------------------------
+# Loading every tile from its own hdf5 file each epoch dominates training time on the T4
+# (brick-kiln speed check). scripts/build_cache.py writes each split once as float32 arrays:
+#   <cache root>/<task>/<split>_x.npy   [N, H, W, C] float32, all bands in card order, raw units
+#   <cache root>/<task>/<split>_y.npy   labels (int64 [N] | float32 [N, K] | int16/int32 masks)
+#   <cache root>/<task>/<split>_meta.json   format, fingerprint, bands, shapes
+# GeoBenchDataset memory-maps them when the fingerprint still matches the source files;
+# otherwise it reads hdf5 as before. Results are identical either way (tested).
+CACHE_FORMAT = 1
+CACHE_SPLITS = ("train", "val")  # the test split is NEVER cached
+
+
+def cache_root() -> Path:
+    """GOTRAIN_DATA_CACHE, default ~/data_cache (outside the repo and the shared ~/data)."""
+    return Path(os.environ.get("GOTRAIN_DATA_CACHE", "~/data_cache")).expanduser()
+
+
+def split_fingerprint(task_name: str, split: str, ds: Any, bands: list[str]) -> str:
+    """Changes whenever the cached content could: format, task, split, bands, sample list, and
+    the total size of the split's hdf5 files (a re-download or edit changes it)."""
+    names = list(ds.active_partition.partition_dict[ds.split])
+    total = sum(
+        (Path(ds.dataset_dir) / f"{n}.hdf5").stat().st_size
+        for n in names
+        if (Path(ds.dataset_dir) / f"{n}.hdf5").exists()
+    )
+    payload = json.dumps([CACHE_FORMAT, task_name, split, bands, names, total])
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def load_cache(task_name: str, split: str, ds: Any, bands: list[str]) -> tuple | None:
+    """Memory-mapped (x, y) if a valid cache exists for this split, else None."""
+    if split not in CACHE_SPLITS:
+        return None
+    folder = cache_root() / task_name
+    meta_path = folder / f"{split}_meta.json"
+    if not meta_path.exists():
+        return None
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        if meta.get("format") != CACHE_FORMAT or meta.get("bands") != bands:
+            return None
+        if meta.get("fingerprint") != split_fingerprint(task_name, split, ds, bands):
+            return None
+        x = np.load(folder / f"{split}_x.npy", mmap_mode="r")
+        y = np.load(folder / f"{split}_y.npy", mmap_mode="r")
+    except (OSError, ValueError):
+        return None
+    if len(x) != len(ds) or len(y) != len(ds):
+        return None
+    return x, y
+
+
+def cache_bytes(n: int, image_hwc: tuple, label_shape: tuple, label_itemsize: int) -> int:
+    """Disk size of one cached split: float32 images + labels."""
+    return int(n * (np.prod(image_hwc) * 4 + np.prod(label_shape or (1,)) * label_itemsize))
+
+
+def _label_store_dtype(kind: str, label: Any) -> Any:
+    if kind == "segmentation":
+        return np.int16 if np.asarray(label).max(initial=0) < 32767 else np.int32
+    return np.float32 if kind == "multilabel" else np.int64
+
+
+def build_split_cache(
+    task_name: str, split: str, data_dir: str | Path | None = None, progress: Any = None
+) -> dict:
+    """Write <cache>/<task>/<split>_{x,y}.npy + meta (atomically). TRAIN/VAL only."""
+    if split not in CACHE_SPLITS:
+        raise PermissionError(f"only {CACHE_SPLITS} are cached; refusing split={split!r}")
+    task = load_task(task_name, data_dir)
+    ds = open_split(task, split)
+    kind = task_type(task)
+    first = ds[0]
+    arr0, raw_names, _ = sample_array(first)
+    bands = channel_names(task_name, raw_names)[0]
+    lab0 = np.asarray(label_value(first.label))
+    label_dtype = _label_store_dtype(kind, lab0)
+    folder = cache_root() / task_name
+    folder.mkdir(parents=True, exist_ok=True)
+    tmp_x, tmp_y = folder / f".{split}_x.tmp.npy", folder / f".{split}_y.tmp.npy"
+    x = np.lib.format.open_memmap(tmp_x, mode="w+", dtype=np.float32, shape=(len(ds), *arr0.shape))
+    y = np.lib.format.open_memmap(tmp_y, mode="w+", dtype=label_dtype, shape=(len(ds), *lab0.shape))
+    for i in range(len(ds)):
+        sample = first if i == 0 else ds[i]
+        x[i] = sample_array(sample)[0]
+        y[i] = np.asarray(label_value(sample.label))
+        if progress and (i + 1) % 500 == 0:
+            progress(i + 1, len(ds))
+    x.flush()
+    y.flush()
+    del x, y
+    meta = {
+        "format": CACHE_FORMAT,
+        "task": task_name,
+        "split": split,
+        "n": len(ds),
+        "bands": bands,
+        "image_shape_hwc": list(arr0.shape),
+        "source_dtype": str(arr0.dtype),
+        "label_dtype": np.dtype(label_dtype).name,
+        "fingerprint": split_fingerprint(task_name, split, ds, bands),
+        "bytes": (tmp_x.stat().st_size + tmp_y.stat().st_size),
+    }
+    tmp_x.replace(folder / f"{split}_x.npy")
+    tmp_y.replace(folder / f"{split}_y.npy")
+    (folder / f"{split}_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    return meta
 
 
 # ---------------------------------------------------------------------------------------------
@@ -700,6 +943,8 @@ class GeoBenchDataset:
 
     bands: "all" or band names (true names, errata applied), in the order the model wants.
     zero_fill: band names in `bands` that this task lacks; fed as all-zero channels.
+    use_cache: read the split from the on-disk .npy cache (scripts/build_cache.py) when one
+           exists and still matches the source files; never for the test split.
     norm:  "zscore"   (x - mean) / std with stats/<task>.json (TRAIN-only stats)
            "div10000" x / 10000, Sentinel-2 reflectance scale (what SSL4EO weights expect)
            "none"     raw values as float32
@@ -717,6 +962,7 @@ class GeoBenchDataset:
         allow_test: bool = False,
         cache: bool = False,
         zero_fill: Sequence[str] = (),
+        use_cache: bool = True,
     ) -> None:
         self.task_name = task_name
         self.split = split
@@ -739,6 +985,10 @@ class GeoBenchDataset:
         self.mean, self.std = self._norm_params(norm)
         self.indices = list(indices) if indices is not None else list(range(len(self.ds)))
         self._cache: dict[int, tuple[np.ndarray, Any]] | None = {} if cache else None
+        # on-disk .npy cache (train/val only; load_cache returns None for the test split)
+        self.disk_cache = (
+            load_cache(task_name, split, self.ds, self.all_bands) if use_cache else None
+        )
 
     def _norm_params(self, norm: Norm) -> tuple[np.ndarray, np.ndarray]:
         n = len(self.bands)
@@ -767,6 +1017,24 @@ class GeoBenchDataset:
         std = np.asarray(stats.std, np.float32)[self.channel_idx]
         return mean, np.where(std < 1e-6, 1.0, std).astype(np.float32)
 
+    def __getstate__(self) -> dict:
+        """Pickled for DataLoader workers (forkserver/spawn): never ship the memory-mapped cache
+        itself (pickling a memmap copies the whole array); each worker reopens it."""
+        state = self.__dict__.copy()
+        state["_cache_files"] = self._cache_files() if self.disk_cache is not None else None
+        state["disk_cache"] = None
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        files = state.pop("_cache_files", None)
+        self.__dict__.update(state)
+        if files is not None:  # the parent already validated the fingerprint
+            self.disk_cache = tuple(np.load(f, mmap_mode="r") for f in files)
+
+    def _cache_files(self) -> tuple[str, str]:
+        folder = cache_root() / self.task_name
+        return str(folder / f"{self.split}_x.npy"), str(folder / f"{self.split}_y.npy")
+
     def __len__(self) -> int:
         return len(self.indices)
 
@@ -776,6 +1044,10 @@ class GeoBenchDataset:
     def raw(self, i: int) -> tuple[np.ndarray, Any]:
         """(H, W, C) array with ALL bands in true order (unnormalised) and the raw label."""
         idx = self.indices[i]
+        if self.disk_cache is not None:
+            x, y = self.disk_cache
+            label = np.asarray(y[idx])
+            return np.asarray(x[idx]), (label.item() if label.ndim == 0 else label)
         if self._cache is not None and idx in self._cache:
             return self._cache[idx]
         sample = self.ds[idx]

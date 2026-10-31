@@ -269,5 +269,18 @@
         "mean": 50.23071104107481
       }
     ]
-  }
+  },
+  "majority_class_baseline": 0.6637,
+  "majority_class_baseline_detail": {
+    "predict": "not brick kiln",
+    "metric": "accuracy"
+  },
+  "flat_tile_fraction": {
+    "not brick kiln": 0.1378,
+    "brick kiln": 0.0
+  },
+  "flat_tile_overall": 0.0915,
+  "flat_tile_threshold": 0.25,
+  "flat_tile_definition": "a tile is nearly flat when the median over bands of (p98 - p2 of its valid pixels in that band) / (that band's train std) is below 0.25",
+  "flat_tile_n": 2000
 }

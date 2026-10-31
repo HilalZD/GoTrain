@@ -292,7 +292,9 @@ def test_eurosat_trial_end_to_end(tmp_path):
     assert result.checkpoint_path == run / "checkpoints" / "best.ckpt"
     for name in ("config.json", "history.json", "metrics.json", "val_predictions.npz"):
         assert (run / name).exists(), name
-    assert json.loads((run / "metrics.json").read_text())["n_train"] == 100
+    metrics = json.loads((run / "metrics.json").read_text())
+    assert metrics["n_train"] == 100
+    assert metrics["stopped_by_budget"] is (metrics["stop_reason"] == "budget")
     assert len(result.history) == 2 and result.minutes_used < 3.0
     rows = json.loads((run / "history.json").read_text())
     assert all(r["train_s"] > 0 and r["val_s"] > 0 for r in rows)
@@ -330,6 +332,7 @@ def test_slow_first_batch_does_not_end_the_trial(tmp_path, monkeypatch):
     assert len(result.history) >= 1
     metrics = json.loads((tmp_path / "run-slow" / "metrics.json").read_text())
     assert metrics["full_epochs"] >= 1 and metrics["n_val"] == 1000
+    assert isinstance(metrics["stopped_by_budget"], bool)
 
 
 @pytest.mark.skipif(not have("m-pv4ger-seg"), reason="needs geobench + m-pv4ger-seg on disk")
@@ -343,3 +346,26 @@ def test_pv4ger_segmentation_trial_end_to_end(tmp_path):
     assert preds["pred_masks"].shape == (403, 320, 320)  # scored at native resolution
     tta = engine.evaluate("m-pv4ger-seg", result.checkpoint_path, "val", tta=True)
     assert tta["metric_name"] == "miou" and 0.0 <= tta["score"] <= 1.0
+
+
+@pytest.mark.skipif(not have("m-eurosat"), reason="needs geobench + m-eurosat on disk")
+def test_budget_stopped_run_is_flagged_in_metrics_json(tmp_path):
+    """Contract request #2: a run cut by its budget is "ok" with stopped_by_budget true."""
+    run = tmp_path / "run-budget"
+    config = cfg(train_subset_frac=0.05, max_epochs=200)  # far more epochs than 0.4 min allows
+    result = engine.train(config, budget_minutes=0.4, run_dir=run)
+    metrics = json.loads((run / "metrics.json").read_text())
+    assert result.status == "ok", result.error
+    assert metrics["stop_reason"] == "budget" and metrics["stopped_by_budget"] is True
+
+
+def test_loader_settings_for_gpu_and_cpu():
+    """forkserver (spawn where it doesn't exist), pinned memory and persistent workers on GPU."""
+    import multiprocessing
+
+    gpu = engine.loader_settings(torch.device("cuda"))
+    assert 1 <= gpu["num_workers"] <= 4
+    assert gpu["pin_memory"] is True and gpu["persistent_workers"] is True
+    expected = "forkserver" if "forkserver" in multiprocessing.get_all_start_methods() else "spawn"
+    assert gpu["multiprocessing_context"] == expected
+    assert engine.loader_settings(torch.device("cpu")) == {"num_workers": 0}

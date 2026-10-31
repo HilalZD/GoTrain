@@ -34,6 +34,7 @@ from __future__ import annotations
 import contextlib
 import json
 import math
+import os
 import random
 import time
 import traceback
@@ -509,21 +510,35 @@ def _seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
 
 
+def loader_settings(device: Any) -> dict:
+    """DataLoader worker settings.
+
+    GPU: up to 4 workers (one CPU core left for the main process), pinned memory for fast
+    host-to-GPU copies, persistent workers (no restart every epoch), and the "forkserver"
+    start method: forking a process that has already initialised CUDA or many threads can
+    deadlock, which would hang an overnight run. ("spawn" where forkserver doesn't exist.)
+    CPU: no workers (loading in the main process is simplest and fast enough there).
+    """
+    import multiprocessing
+
+    if device.type != "cuda":
+        return {"num_workers": 0}
+    methods = multiprocessing.get_all_start_methods()
+    return {
+        "num_workers": max(1, min(4, (os.cpu_count() or 2) - 1)),
+        "pin_memory": True,
+        "persistent_workers": True,
+        "multiprocessing_context": "forkserver" if "forkserver" in methods else "spawn",
+    }
+
+
 def _loaders(train_ds: Any, val_ds: Any, batch_size: int, device: Any) -> tuple[Any, Any]:
     from torch.utils.data import DataLoader
 
-    workers = 4 if device.type == "cuda" else 0
-    pin = device.type == "cuda"
-    train_dl = DataLoader(
-        train_ds,
-        batch_size,
-        shuffle=True,
-        drop_last=len(train_ds) > batch_size,
-        num_workers=workers,
-        pin_memory=pin,
-        persistent_workers=workers > 0,
-    )
-    val_dl = DataLoader(val_ds, batch_size, num_workers=workers, pin_memory=pin)
+    settings = loader_settings(device)
+    drop_last = len(train_ds) > batch_size
+    train_dl = DataLoader(train_ds, batch_size, shuffle=True, drop_last=drop_last, **settings)
+    val_dl = DataLoader(val_ds, batch_size, **settings)
     return train_dl, val_dl
 
 
@@ -707,10 +722,15 @@ def _train(
             "epochs_run": len(history),
             "full_epochs": full_epochs,
             "stop_reason": stop_reason,
+            "stopped_by_budget": stop_reason == "budget",  # contract request #2 (Hilal)
             **nodata_extras(config.task, (best["preds"] or {}).get("confusion")),
             "minutes_used": round(minutes, 3),
             "budget_minutes": budget_minutes,
             "n_train": len(train_ds),
+            "data_cache": {
+                "train": train_ds.disk_cache is not None,
+                "val": val_ds.disk_cache is not None,
+            },
             "n_val": len(val_ds),
             "device": str(device),
             "bands": bands,

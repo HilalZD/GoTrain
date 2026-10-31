@@ -158,3 +158,16 @@ Each entry: what, why, and the smallest change that would do it.
   `to_dataset_card`. `DatasetCard` ignores unknown keys today, so once the names are agreed
   Hilal adds the two optional fields to `contracts.py` and shows them in `inspect_dataset`'s
   summary. Facts only: no recipe or advice in the card.
+- **Serena's reply (done):** both are computed generically in `inspect_task()` (no task-specific
+  logic), on the same seeded 2,000-tile train sample as the stats, and cached in
+  `stats/<task>_card.json` under the final names:
+  - `majority_class_baseline` (float): VAL score of always predicting the most common TRAIN
+    class, with the official metric (accuracy; contract-v2 mIoU of an all-majority mask, where
+    the other classes present in val get IoU 0; micro-F1 for multilabel).
+  - `flat_tile_fraction` (dict class -> fraction of sampled train tiles below the threshold).
+  - Flatness: a tile is flat when the median over bands of (p98 − p2 of its valid pixels in that
+    band) / (that band's train std) is below **0.25**. Chosen from data: eurosat's contrast is
+    bimodal (5% of tiles < 0.06, 90% > 0.5). The definition and sample size are stored next to
+    the fields (`flat_tile_definition`, `flat_tile_n`).
+  - `to_dataset_card()` passes both straight through (ignored until the fields exist), and the
+    card's notes state them as facts only.

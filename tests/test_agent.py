@@ -75,8 +75,10 @@ def test_tune_tools_exclude_final_test():
     assert "final_test" not in agent.tool_names
     assert set(agent.tool_names) == {
         "inspect_dataset",
+        "run_halving",
         "run_trials",
         "promote",
+        "confirm_seeds",
         "leaderboard",
         "diagnose",
         "register_model",
@@ -120,7 +122,7 @@ def test_bedrock_model_uses_settings_and_adaptive_retries():
 def test_kickoff_lists_budget_and_versions():
     init_task_budget(TASK, 30)
     assert "30 min remaining" in kickoff_message(TASK, "tune")
-    run_id = run_trials(TASK, [make_config()], 2.0)["results"][0]["run_id"]
+    run_id = run_trials(TASK, [make_config()], 2.0)["trials"][0]["run_id"]
     register_model(run_id)
     assert "- v1: val_score=" in kickoff_message(TASK, "finalise")
 
@@ -259,7 +261,7 @@ def test_cli_has_no_all_mode():
 @pytest.fixture
 def registered():
     init_task_budget(TASK, 30)
-    register_model(run_trials(TASK, [make_config()], 2.0)["results"][0]["run_id"])
+    register_model(run_trials(TASK, [make_config()], 2.0)["trials"][0]["run_id"])
 
 
 def test_cli_finalise_requires_typed_confirmation(fake_agent, registered):

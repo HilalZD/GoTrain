@@ -23,6 +23,7 @@ from gotrain.audit import AuditLog
 from gotrain.config import Settings, get_settings
 from gotrain.contracts import TrainConfig
 from gotrain.tools import (
+    confirm_seeds,
     diagnose,
     final_test,
     inspect_dataset,
@@ -30,6 +31,7 @@ from gotrain.tools import (
     promote,
     read_lessons,
     register_model,
+    run_halving,
     run_trials,
     write_lesson,
 )
@@ -41,8 +43,10 @@ PROMPTS_DIR = Path(__file__).parent / "prompts"
 PHASE_TOOLS = {
     "tune": [
         inspect_dataset,
+        run_halving,
         run_trials,
         promote,
+        confirm_seeds,
         leaderboard,
         diagnose,
         register_model,
@@ -114,9 +118,12 @@ def config_reference() -> str:
     return "\n".join(lines)
 
 
+CONFIG_TOOLS = (run_trials, run_halving)  # tools whose `configs` argument needs the field list
+
+
 def to_strands_tool(fn: Any) -> Any:
-    """Expose a plain GoTrain tool to Strands; run_trials also gets the config field list."""
-    if fn is not run_trials:
+    """Expose a plain GoTrain tool to Strands; config-taking tools also get the field list."""
+    if fn not in CONFIG_TOOLS:
         return strands_tool(fn)
     summary = inspect.cleandoc(fn.__doc__).split("\n\nArgs:")[0]
     description = f"{summary}\n\nEach config is an object with these fields:\n{config_reference()}"

@@ -11,20 +11,29 @@ tested once, later, by someone else.
 
 1. **Understand the data.** Call `inspect_dataset`, and `read_lessons` with the task's sensor
    and task type. Note the class balance, image size, bands and anything in the notes.
-2. **Propose 4–8 diverse configs**, each with a one-line `reason`. Always include one safe
-   baseline (pretrained backbone, sensible lr, flips + rot90). Cover different hypotheses
-   (weights, lr, loss, augmentation, image size), not near-duplicates.
-3. **Run short trials** with `run_trials`. Use a small `budget_minutes_per_trial` (and
-   `train_subset_frac` if trials are slow) so you can afford several rounds.
-4. **Diagnose the leaders** with `diagnose`: is the curve overfitting, underfitting or fine?
+2. **Explore with `run_halving`.** Propose 4–8 diverse configs, each with a one-line
+   `reason`. Always include one safe baseline (pretrained backbone, sensible lr, flips +
+   rot90). Cover different hypotheses (weights, lr, loss, augmentation, image size), not
+   near-duplicates. Rung 1 screens every config cheaply (`short_minutes`, plus
+   `train_subset_frac` if trials are slow); only the `keep_top` best are re-trained for
+   `long_minutes`. The tool refuses a round that doesn't fit the budget and suggests a smaller one.
+3. **Diagnose the leaders** with `diagnose`: is the curve overfitting, underfitting or fine?
    Which classes fail, and what are they confused with?
-5. **Promote the best 1–2 runs** with `promote`, or run refined configs that apply the fix the
-   diagnosis suggests.
-6. **Repeat** while budget remains and scores keep improving. **Stop** when the best validation
-   score has improved by less than 0.5 points (0.005) across 3 rounds, or the budget is nearly
-   gone.
-7. **Finish** by calling `register_model` on the best run **by validation score** (check
-   `leaderboard`), with notes explaining why it won. Then stop.
+4. **Refine.** Apply the fix the diagnosis suggests, one change per hypothesis: another
+   `run_halving` round of variants, `run_trials` for one or two configs, or `promote` to give
+   an underfitting leader more time.
+5. **Repeat** while budget remains and scores keep improving. **Stop exploring** when the best
+   validation score has improved by less than 0.5 points (0.005) across 3 rounds, or the
+   budget is nearly gone.
+6. **Confirm before registering.** If the budget allows, call `confirm_seeds` on the top 2
+   candidates. Seed noise is real: a single run can be a few tenths of a point lucky.
+   - **A gain only counts if it is larger than the measured seed noise**: the larger of the
+     two candidates' stds. Smaller differences are a tie.
+   - Pick the candidate with the best **mean** score (on a tie, prefer the cheaper or
+     simpler one).
+7. **Finish** by calling `register_model` on a run of the chosen candidate. In the notes, say
+   it was chosen by mean validation score, and give mean ± std for both candidates (or say
+   that seeds could not be checked for lack of budget). Then stop.
 
 # Rules
 

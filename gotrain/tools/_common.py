@@ -4,6 +4,7 @@ Storage layout (keys under GOTRAIN_HOME):
     runs/<task>/<run_id>/            config.json, result.json, git_commit, checkpoints/
     registry/<task>/leaderboard.jsonl
     registry/<task>/budget.json
+    registry/<task>/seed_groups.json
     registry/<task>/v1/, v2/ ...
     registry/<task>/TEST_LOCK.json
     memory/lessons.md
@@ -14,6 +15,7 @@ import hashlib
 import inspect
 import json
 import re
+import statistics
 import subprocess
 import uuid
 from collections.abc import Callable
@@ -178,3 +180,44 @@ def summarize_config(config: TrainConfig) -> str:
     if config.seed:
         parts.append(f"seed={config.seed}")
     return " ".join(parts)
+
+
+# ---------------------------------------------------------------- seed groups
+
+
+def seed_groups_key(task: str) -> str:
+    return f"registry/{task}/seed_groups.json"
+
+
+def load_seed_groups(task: str) -> dict[str, dict]:
+    """{seed_group_id: {"base_run_id", "run_ids"}}; the base run is the first member."""
+    key = seed_groups_key(task)
+    return read_json(key) if storage().exists(key) else {}
+
+
+def save_seed_groups(task: str, groups: dict[str, dict]) -> None:
+    write_json(seed_groups_key(task), groups)
+
+
+def group_of(run_id: str, groups: dict[str, dict]) -> str | None:
+    return next((gid for gid, g in groups.items() if run_id in g["run_ids"]), None)
+
+
+def group_stats(run_ids: list[str], entries: list[dict]) -> dict:
+    """Mean and sample std of the successful runs' val scores (std is None for n < 2)."""
+    by_id = {e["run_id"]: e for e in entries}
+    scores = [
+        by_id[r]["val_score"]
+        for r in run_ids
+        if r in by_id and by_id[r]["status"] == "ok" and by_id[r]["val_score"] is not None
+    ]
+    mean = round(statistics.mean(scores), 4) if scores else None
+    std = round(statistics.stdev(scores), 4) if len(scores) >= 2 else None
+    return {"scores": scores, "n": len(scores), "mean": mean, "std": std}
+
+
+def mean_std_text(stats: dict) -> str | None:
+    if stats["mean"] is None:
+        return None
+    std = f"{stats['std']:.4f}" if stats["std"] is not None else "?"
+    return f"{stats['mean']:.4f} ± {std} (n={stats['n']})"

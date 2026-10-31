@@ -31,7 +31,7 @@ def budget(home):
 
 
 def one_run(**overrides) -> str:
-    return run_trials(TASK, [make_config(**overrides)], 2.0)["results"][0]["run_id"]
+    return run_trials(TASK, [make_config(**overrides)], 2.0)["trials"][0]["run_id"]
 
 
 # ---------------------------------------------------------------- memory + inspect
@@ -75,7 +75,7 @@ def test_inspect_unknown_task(home):
 
 
 def test_diagnose_overfitting_and_underfitting(budget):
-    over = run_trials(TASK, [make_config(augment=[], max_epochs=60)], 7.0)["results"][0]
+    over = run_trials(TASK, [make_config(augment=[], max_epochs=60)], 7.0)["trials"][0]
     out = diagnose(over["run_id"])
     assert out["curve_verdict"] == "overfitting" and "augmentation" in out["advice"]
     assert out["per_class_metric"] == "recall" and len(out["weakest_classes"]) == 3
@@ -86,7 +86,7 @@ def test_diagnose_overfitting_and_underfitting(budget):
 
 def test_diagnose_finds_rare_segmentation_class(budget):
     cfg = make_config(weights="imagenet", img_size=320, loss="dice_bce")
-    run_id = run_trials("m-pv4ger-seg", [cfg], 10.0)["results"][0]["run_id"]
+    run_id = run_trials("m-pv4ger-seg", [cfg], 10.0)["trials"][0]["run_id"]
     out = diagnose(run_id)
     assert out["per_class_metric"] == "iou"
     assert next(iter(out["weakest_classes"])) == "solar_panel"
@@ -123,7 +123,7 @@ def test_register_refuses_error_runs(budget):
 
 
 def test_model_card_shows_lineage(budget):
-    parent = run_trials(TASK, [make_config()], 1.0)["results"][0]["run_id"]
+    parent = run_trials(TASK, [make_config()], 1.0)["trials"][0]["run_id"]
     child = promote(parent, 2.0)["child"]["run_id"]
     register_model(child)
     card = (budget / "registry" / TASK / "v1" / "model_card.md").read_text()
@@ -185,7 +185,7 @@ def test_engine_crash_is_a_failed_trial_not_a_tool_error(budget, monkeypatch):
             raise MemoryError("CUDA out of memory")
 
     monkeypatch.setattr("gotrain.tools.trials.get_engine", lambda: Crashing())
-    (row,) = run_trials(TASK, [make_config()], 1.0)["results"]
+    (row,) = run_trials(TASK, [make_config()], 1.0)["trials"]
     assert row["status"] == "error" and "CUDA out of memory" in row["error"]
 
 

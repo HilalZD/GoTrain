@@ -17,7 +17,11 @@ from gotrain.tools._common import (
     error,
     find_entry,
     git_commit,
+    group_of,
+    group_stats,
     load_entries,
+    load_seed_groups,
+    mean_std_text,
     new_run_id,
     now_utc,
     rank,
@@ -111,8 +115,13 @@ def _train(config: TrainConfig, run_id: str, budget_minutes: float) -> TrainResu
         )
 
 
-def _execute_trial(config: TrainConfig, budget_minutes: float, parent: str | None) -> dict:
-    """Train once, save everything under runs/<task>/<run_id>/, charge budget, log entry."""
+def _execute_trial(
+    config: TrainConfig, budget_minutes: float, parent: str | None, **extra: Any
+) -> dict:
+    """Train once, save everything under runs/<task>/<run_id>/, charge budget, log entry.
+
+    `extra` adds fields to the leaderboard entry (e.g. rung, halving_id, seed_group).
+    """
     run_id = new_run_id(config)
     key = run_key(config.task, run_id)
     storage().write_text(f"{key}/config.json", config.model_dump_json(indent=2))
@@ -142,13 +151,16 @@ def _execute_trial(config: TrainConfig, budget_minutes: float, parent: str | Non
         "checkpoint": checkpoint,
         "error": result.error,
         "created_at": now_utc().isoformat(),
+        **extra,
     }
     append_entry(config.task, entry)
     return entry
 
 
-def _row(entry: dict) -> dict:
-    row = {k: entry[k] for k in ("run_id", "status", "val_score", "minutes", "reason")}
+def _row(entry: dict, *extra_keys: str) -> dict:
+    """The compact view of one trial that tools return (and the audit log records)."""
+    keys = ("run_id", *extra_keys, "status", "val_score", "minutes", "reason")
+    row = {k: entry.get(k) for k in keys}
     if entry.get("error"):
         row["error"] = entry["error"]
     return row
@@ -220,7 +232,7 @@ def run_trials(task: str, configs: list[dict], budget_minutes_per_trial: float) 
     best = rank(load_entries(task))[0] if load_entries(task) else None
     out = {
         "task": task,
-        "results": [_row(e) for e in rank(ran)],
+        "trials": [_row(e) for e in rank(ran)],
         "invalid": invalid,
         "skipped": skipped,
         "best_overall": _row(best) if best else None,
@@ -289,6 +301,9 @@ def promote(run_id: str, extra_budget_minutes: float) -> dict:
 def leaderboard(task: str, top_k: int = 10) -> dict:
     """The task's runs ranked by val score: config summary, score, minutes, status, parent.
 
+    Runs in a seed group also show the group's mean ± std; "seed_groups" ranks the groups
+    by mean score.
+
     Args:
         task: GEO-Bench task name.
         top_k: How many runs to return (1-100).
@@ -296,16 +311,27 @@ def leaderboard(task: str, top_k: int = 10) -> dict:
     if not isinstance(top_k, int) or not 1 <= top_k <= 100:
         return error(f"top_k must be an integer from 1 to 100, got {top_k!r}", "Use top_k=10.")
     entries = rank(load_entries(task))
-    top = [
-        {
-            "rank": i,
-            **{k: e[k] for k in ("run_id", "status", "val_score", "minutes", "config", "parent")},
-        }
-        for i, e in enumerate(entries[:top_k], start=1)
-    ]
+    groups = load_seed_groups(task)
+    stats = {gid: group_stats(g["run_ids"], entries) for gid, g in groups.items()}
+    top = []
+    for i, e in enumerate(entries[:top_k], start=1):
+        row = {"rank": i}
+        row |= {k: e[k] for k in ("run_id", "status", "val_score", "minutes", "config", "parent")}
+        if gid := group_of(e["run_id"], groups):
+            row |= {"seed_group": gid, "mean_std": mean_std_text(stats[gid])}
+        top.append(row)
     out = {"task": task, "n_runs": len(entries), "metric_name": None, "top": top}
+    if groups:
+        out["seed_groups"] = sorted(
+            (
+                {"seed_group": gid, "base_run_id": groups[gid]["base_run_id"]}
+                | {"mean_std": mean_std_text(st), "mean": st["mean"], "std": st["std"]}
+                for gid, st in stats.items()
+            ),
+            key=lambda g: -(g["mean"] or 0.0),
+        )
     if entries:
         out["metric_name"] = entries[0]["metric_name"]
     else:
-        out["hint"] = "No runs yet for this task. Start with run_trials."
+        out["hint"] = "No runs yet for this task. Start with run_halving or run_trials."
     return out

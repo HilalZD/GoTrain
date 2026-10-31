@@ -166,11 +166,18 @@ SETUP_MINUTES = 0.2
 BEST_LOG10_LR = -3.3
 OVERFIT_START = 20  # epochs; runs without augmentation start losing val score after this
 OVERFIT_RATE = 0.0015
+SEED_NOISE_STD = 0.0025  # seed-to-seed spread of the final score: roughly +-0.3 points
+EPOCH_NOISE_STD = 0.002  # epoch-to-epoch wobble of the val curve
 
 
-def config_seed(config: TrainConfig) -> int:
-    """Stable seed from everything that affects training (not the free-text reason)."""
-    payload = config.model_dump_json(exclude={"reason"})
+def config_seed(config: TrainConfig, include_seed: bool = True) -> int:
+    """Stable seed from everything that affects training (not the free-text reason).
+
+    With include_seed=False, runs that differ only in `seed` share the value: it drives
+    the config's intrinsic quality, while the full value drives seed noise.
+    """
+    exclude = {"reason"} if include_seed else {"reason", "seed"}
+    payload = config.model_dump_json(exclude=exclude)
     return int(hashlib.sha256(payload.encode()).hexdigest()[:16], 16)
 
 
@@ -181,7 +188,11 @@ def metric_for(card: DatasetCard) -> str:
 
 
 def target_score(config: TrainConfig, card: DatasetCard, rng: random.Random) -> float:
-    """The score this config converges to with enough epochs."""
+    """The score this config converges to with enough epochs.
+
+    `rng` is seeded per run (config + seed) and adds seed noise of ~SEED_NOISE_STD; a
+    smaller per-config offset (seed excluded) makes near-identical configs differ too.
+    """
     s2 = card.sensor == "sentinel-2"
     score = BASE_SCORE[card.task]
     score += (
@@ -192,7 +203,8 @@ def target_score(config: TrainConfig, card: DatasetCard, rng: random.Random) -> 
     score -= 0.06 * (1.0 - config.train_subset_frac)
     if config.bands != "all" and len(config.bands) < 3:
         score -= 0.03
-    return score + rng.uniform(-0.01, 0.01)
+    config_offset = random.Random(config_seed(config, include_seed=False)).uniform(-0.005, 0.005)
+    return score + config_offset + rng.gauss(0, SEED_NOISE_STD)
 
 
 def minutes_per_epoch(config: TrainConfig, card: DatasetCard) -> float:
@@ -214,7 +226,7 @@ def make_history(
     """Rising val curve; past OVERFIT_START epochs it decays by overfit_rate per epoch."""
     history = []
     for e in range(1, epochs + 1):
-        val = target * (1 - 0.35 * math.exp(-e / 8)) + rng.gauss(0, 0.004)
+        val = target * (1 - 0.35 * math.exp(-e / 8)) + rng.gauss(0, EPOCH_NOISE_STD)
         val -= overfit_rate * max(0, e - OVERFIT_START)
         loss = 0.15 + 1.6 * math.exp(-e / 5) + abs(rng.gauss(0, 0.02))
         elapsed = (SETUP_MINUTES + e * per_epoch_min) * 60

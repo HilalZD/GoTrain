@@ -18,7 +18,7 @@ def budget(home):
 def test_run_trials_saves_run_folder_and_returns_table(budget):
     out = run_trials(TASK, [make_config()], 2.0)
     assert "error" not in out
-    (row,) = out["results"]
+    (row,) = out["trials"]
     assert set(row) == {"run_id", "status", "val_score", "minutes", "reason"}
     assert re.fullmatch(r"m-eurosat-\d{8}-\d{6}-[0-9a-f]{4}", row["run_id"])
 
@@ -33,7 +33,7 @@ def test_run_trials_saves_run_folder_and_returns_table(budget):
 def test_invalid_configs_reported_valid_ones_still_run(budget):
     configs = [make_config(), make_config(lr=5.0), make_config(learning_rate=1e-3), "oops"]
     out = run_trials(TASK, configs, 1.0)
-    assert len(out["results"]) == 1
+    assert len(out["trials"]) == 1
     errors = {item["index"]: item["error"] for item in out["invalid"]}
     assert "lr: Input should be less than or equal to 0.1" in errors[1]
     assert "Hint: Learning rate" in errors[1]
@@ -44,7 +44,7 @@ def test_invalid_configs_reported_valid_ones_still_run(budget):
 
 def test_config_for_another_task_is_invalid(budget):
     out = run_trials(TASK, [make_config(task="m-brick-kiln")], 1.0)
-    assert out["results"] == [] and "but task is 'm-eurosat'" in out["invalid"][0]["error"]
+    assert out["trials"] == [] and "but task is 'm-eurosat'" in out["invalid"][0]["error"]
 
 
 def test_budget_must_be_initialised(home):
@@ -55,7 +55,7 @@ def test_budget_must_be_initialised(home):
 def test_budget_is_enforced(home):
     init_task_budget(TASK, 5)
     out = run_trials(TASK, [make_config(seed=i) for i in range(3)], 2.0)
-    assert len(out["results"]) == 2  # each fits 18 epochs = 2.0 min, leaving 1.0 < 2.0
+    assert len(out["trials"]) == 2  # each fits 18 epochs = 2.0 min, leaving 1.0 < 2.0
     (skip,) = out["skipped"]
     assert skip["index"] == 2 and "only 1 min of budget remain" in skip["reason"]
     assert out["budget"]["remaining_min"] == pytest.approx(1.0)
@@ -94,7 +94,7 @@ def test_leaderboard_bad_args_and_empty(budget):
 
 
 def test_promote_links_parent_to_child(budget):
-    parent = run_trials(TASK, [make_config()], 1.0)["results"][0]
+    parent = run_trials(TASK, [make_config()], 1.0)["trials"][0]
     out = promote(parent["run_id"], 2.0)
     assert out["parent"]["run_id"] == parent["run_id"]
     assert out["child"]["epochs"] > out["parent"]["epochs"]
@@ -107,9 +107,9 @@ def test_promote_links_parent_to_child(budget):
 
 def test_promote_refusals(home):
     init_task_budget(TASK, 3)
-    short = run_trials(TASK, [make_config()], 1.0)["results"][0]["run_id"]
+    short = run_trials(TASK, [make_config()], 1.0)["trials"][0]["run_id"]
     assert "remain" in promote(short, 2.5)["error"]  # needs 3.5, has 2.1
     assert "no run with run_id" in promote("m-eurosat-nope", 1.0)["error"]
 
-    complete = run_trials(TASK, [make_config(max_epochs=5)], 1.0)["results"][0]["run_id"]
+    complete = run_trials(TASK, [make_config(max_epochs=5)], 1.0)["trials"][0]["run_id"]
     assert "already finished all 5 epochs" in promote(complete, 1.0)["error"]

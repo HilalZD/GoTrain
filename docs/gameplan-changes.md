@@ -80,3 +80,21 @@ Tools refuse to start a trial that would exceed what remains. The agent cannot r
 Anything else returns status "error" listing these options. The single source of truth is
 `gotrain/engine/combos.py` (`VALID_COMBOS`, `check_combo`). The tools reject invalid combos
 before training, and the fake engine fails on them the same way the real engine does.
+
+## Smarter GPU use: successive halving and seed checks (tune phase only)
+
+- **`run_halving(task, configs, short_minutes, long_minutes, keep_top)`** is the default
+  exploration round. Rung 1 trains every valid config for `short_minutes`; the `keep_top`
+  best by val score are re-trained for `long_minutes` as child runs (parent link, as with
+  `promote`). The worst-case cost `n * short + keep_top * long` is checked against the
+  remaining budget *before* anything starts; if it doesn't fit, the tool refuses and suggests
+  a round that would. Every trial of both rungs is a `trial` event in the audit log.
+- **`confirm_seeds(run_id, n_seeds=2)`** re-trains the same config (same budget) with new
+  seeds and groups the runs (`seed_group`), reporting every score, the mean and the std.
+  `leaderboard` shows mean ± std for runs in a seed group and ranks the groups by mean.
+- **Noise rule:** a gain between two candidates only counts if it is larger than the measured
+  seed noise, i.e. the larger std of the two. Before registering (budget permitting) the
+  agent seed-checks its top 2 candidates and registers the one with the best **mean**, saying
+  so in the model card notes.
+- The fake engine's seed noise is ~±0.3 points (std ≈ 0.003), deterministic per
+  (config, seed), so seed checks behave like real ones in dev runs.

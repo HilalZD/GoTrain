@@ -8,7 +8,9 @@ Every line has: ts (UTC), session_id, task, phase, event. Events:
     assistant_text                the agent's reasoning, as written
     tool_start                    tool name and args, before it runs
     tool_call                     name, args, result summary, duration_s, status, error
-    model_error                   a failed Bedrock call (it may be retried)
+    trial                         one per trial a tool ran (its "trials" rows): run_id, rung,
+                                  parent, seed_group, status, val_score, minutes
+    model_error                 a failed Bedrock call (it may be retried)
 
 Named audit.py (not logging.py) so it never shadows the stdlib logging module.
 """
@@ -149,6 +151,22 @@ class AuditLog(HookProvider):
             f"   - args: `{truncate(args, MAX_JOURNAL_CHARS)}`\n"
             f"   - result: `{truncate(text, MAX_JOURNAL_CHARS)}`"
         )
+        self._log_trials(tool_use["name"], text)
+
+    def _log_trials(self, tool_name: str, text: str) -> None:
+        """One untruncated `trial` event per row of a tool's "trials" list."""
+        try:
+            trials = json.loads(text).get("trials") or []
+        except (ValueError, AttributeError):
+            return
+        for row in trials:
+            self.log("trial", tool=tool_name, **row)
+            rung = f"rung {row['rung']} " if row.get("rung") else ""
+            parent = f" <- {row['parent']}" if row.get("parent") else ""
+            self.journal(
+                f"   - trial {rung}`{row.get('run_id')}`{parent}: {row.get('status')}, "
+                f"val {row.get('val_score')}, {row.get('minutes')} min"
+            )
 
     def _message_added(self, event: MessageAddedEvent) -> None:
         message = event.message

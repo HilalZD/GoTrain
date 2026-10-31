@@ -171,3 +171,25 @@ Each entry: what, why, and the smallest change that would do it.
     the fields (`flat_tile_definition`, `flat_tile_n`).
   - `to_dataset_card()` passes both straight through (ignored until the fields exist), and the
     card's notes state them as facts only.
+
+## 12. Optional confidence keys in `predict()` (Serena → Hilal; wire into the MCP output)
+
+- **Exact key names (both optional; existing keys unchanged):**
+  - `confidence`: float32, shape `[N]` (classification) or `[N, H, W]` (segmentation, per
+    pixel). The temperature-calibrated top-class probability.
+  - `needs_review`: bool, same shape as `confidence`. True where `confidence` is below the
+    run's threshold, chosen on VALIDATION as the largest coverage whose confident predictions
+    have ≤ 1% error.
+- **When they're present:** only if the checkpoint's run has `run_dir/calibration.json` (written
+  by `gotrain.engine.calibration.calibrate(task, run_dir)`), `predict()` gets a single
+  checkpoint, and `tta=False`. That's the setting the temperature and threshold were fitted
+  for. For ensembles, TTA or uncalibrated runs, the keys are absent (not None).
+- `probabilities` and `labels` are unchanged: temperature scaling never changes the argmax.
+- **Also in calibration.json (segmentation):** a tile-level rule (needs review when > 20% of
+  the pixels predicted as a target class are uncertain), its flagged share and mean tile mIoU
+  for flagged vs unflagged tiles. All numbers there are measured on VALIDATION, where T and the
+  threshold were fitted; the file says so in `note`.
+- **Where the logits come from:** `val_predictions.npz` stores softmax **probabilities**
+  (`probs` [N, K], float32), not logits, so calibration uses log-probabilities as logits
+  (exact for temperature scaling). Segmentation runs don't save per-pixel probabilities, so
+  `calibrate()` recomputes them from the checkpoint on VALIDATION (CPU).

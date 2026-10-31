@@ -5,6 +5,7 @@ End-to-end trials need the GEO-Bench files and are skipped without them.
 """
 
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -99,6 +100,17 @@ def test_lr_factor_warms_up_then_decays_to_zero():
     assert engine.lr_factor(engine.WARMUP_FRACTION) == pytest.approx(1.0)
     assert engine.lr_factor(0.5) < 1.0
     assert engine.lr_factor(1.0) == pytest.approx(0.0, abs=1e-9)
+
+
+def test_reserve_is_capped_at_half_the_training_window():
+    # SageMaker bug: warm-up made one sample look like 0.25 s -> 0.5 * 0.25 * 1000 val samples
+    # = 125 s reserve, more than a 3-minute trial's whole window after setup.
+    assert engine.reserve_seconds(None, 0.25, 1000, window_s=100.0) == pytest.approx(50.0)
+    assert engine.reserve_seconds(None, None, 1000, window_s=100.0) == engine.SAVE_MARGIN_S
+    assert engine.reserve_seconds(4.0, 99.0, 1000, window_s=100.0) == pytest.approx(
+        1.3 * 4.0 + engine.SAVE_MARGIN_S
+    )
+    assert engine.reserve_seconds(None, 0.001, 1000, window_s=-5.0) == 0.0
 
 
 @pytest.mark.parametrize(
@@ -279,6 +291,9 @@ def test_eurosat_trial_end_to_end(tmp_path):
         assert (run / name).exists(), name
     assert json.loads((run / "metrics.json").read_text())["n_train"] == 100
     assert len(result.history) == 2 and result.minutes_used < 3.0
+    rows = json.loads((run / "history.json").read_text())
+    assert all(r["train_s"] > 0 and r["val_s"] > 0 for r in rows)
+    assert all(r["train_s"] + r["val_s"] <= r["elapsed_s"] for r in rows)
     out = engine.evaluate("m-eurosat", result.checkpoint_path, "val")
     assert out["metric_name"] == "accuracy"
     assert out["score"] == pytest.approx(result.val_score, abs=1e-4)
@@ -290,6 +305,28 @@ def test_eurosat_trial_end_to_end(tmp_path):
 def test_tiny_budget_times_out_cleanly(tmp_path):
     result = engine.train(cfg(), budget_minutes=0.001, run_dir=tmp_path / "run-tiny")
     assert result.status == "timeout" and result.checkpoint_path is None
+    assert result.history == []  # tools/trials.py fails fast on 0-epoch timeouts
+
+
+@pytest.mark.skipif(not have("m-eurosat"), reason="m-eurosat not downloaded")
+def test_slow_first_batch_does_not_end_the_trial(tmp_path, monkeypatch):
+    """Regression (SageMaker): warm-up in the first batch inflated the val reserve past the
+    budget, so a 3-minute trial stopped after ~10 s with 0 epochs."""
+    real_augment, calls = engine.augment, []
+
+    def slow_first_batch(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            time.sleep(4.0)  # 4 s / 16 samples = 0.25 s per "sample" if warm-up were counted
+        return real_augment(*args, **kwargs)
+
+    monkeypatch.setattr(engine, "augment", slow_first_batch)
+    config = cfg(train_subset_frac=0.05, max_epochs=2)  # 100 train tiles, full 1000-tile val
+    result = engine.train(config, budget_minutes=1.0, run_dir=tmp_path / "run-slow")
+    assert result.status == "ok", result.error
+    assert len(result.history) >= 1
+    metrics = json.loads((tmp_path / "run-slow" / "metrics.json").read_text())
+    assert metrics["full_epochs"] >= 1 and metrics["n_val"] == 1000
 
 
 @pytest.mark.skipif(not have("m-pv4ger-seg"), reason="m-pv4ger-seg not downloaded")

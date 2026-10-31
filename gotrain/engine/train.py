@@ -18,7 +18,12 @@ How one trial runs:
 
 Status: "ok" = at least one full epoch was trained and validated (stopping at the budget is
 the normal end of a time-budgeted trial); "timeout" = the budget ran out inside the first
-epoch (any checkpoint saved is still returned); "error" = anything else, with a message.
+epoch: empty history, no checkpoint (the tools fail fast on 0-epoch timeouts); "error" =
+anything else, with a message. The first batch always runs, and the time reserved for the
+final validation is estimated without warm-up batches and capped at half the training window.
+
+history.json rows = EpochRecord fields + train_s (training time of that epoch, measured
+before validation) and val_s (validation time), for planning time budgets.
 train() never raises.
 
 Metrics: accuracy (classification), micro-F1 "f1" (multilabel), mIoU "miou" (segmentation).
@@ -60,6 +65,8 @@ LOSSES = {
 BINARY_SEG_LOSSES = ("bce", "dice_bce")  # one logit per pixel; needs exactly 2 classes
 WARMUP_FRACTION = 0.05
 SAVE_MARGIN_S = 3.0
+RESERVE_CAP = 0.5  # the validation reserve never takes more than half the training window
+VAL_COST_RATIO = 0.5  # before the first validation: a val sample ~ half a train sample's cost
 CKPT_NAME = "checkpoints/best.ckpt"
 
 
@@ -425,6 +432,25 @@ def checkpoint_dataset(ckpt: dict, split: str, allow_test: bool = False) -> GeoB
 # ---------------------------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------------------------
+def reserve_seconds(
+    val_seconds: float | None, sec_per_sample: float | None, n_val: int, window_s: float
+) -> float:
+    """Seconds to keep free for the final validation + checkpoint.
+
+    Uses the measured validation time once there is one; before that, an estimate from the
+    training speed (which excludes warm-up batches, see the loop). Capped at RESERVE_CAP of
+    the training window (fixed when training starts), so a bad estimate can never eat the
+    whole budget.
+    """
+    if val_seconds is not None:
+        estimate = 1.3 * val_seconds
+    elif sec_per_sample is not None:
+        estimate = VAL_COST_RATIO * sec_per_sample * n_val
+    else:
+        estimate = 0.0
+    return min(estimate + SAVE_MARGIN_S, RESERVE_CAP * max(window_s, 0.0))
+
+
 def lr_factor(progress: float) -> float:
     """Linear warm-up for the first 5% of progress, then cosine decay to 0 at progress 1."""
     if progress < WARMUP_FRACTION:
@@ -457,6 +483,11 @@ def _loaders(train_ds: Any, val_ds: Any, batch_size: int, device: Any) -> tuple[
     )
     val_dl = DataLoader(val_ds, batch_size, num_workers=workers, pin_memory=pin)
     return train_dl, val_dl
+
+
+def history_rows(history: list[EpochRecord], timings: list[dict]) -> list[dict]:
+    """history.json rows: the contract's EpochRecord fields plus train_s and val_s."""
+    return [h.model_dump() | t for h, t in zip(history, timings, strict=True)]
 
 
 def _write_json(path: Path, obj: Any) -> None:
@@ -530,17 +561,19 @@ def _train(
     # --- loop ---
     max_steps = config.max_epochs * len(train_dl)
     train_start = time.monotonic()
+    window_s = deadline - train_start  # training window, fixed once (caps the reserve)
     history: list[EpochRecord] = []
+    timings: list[dict] = []  # per epoch: train_s, val_s (history.json extras)
     best = {"score": -1.0, "epoch": 0, "preds": None}
-    step, full_epochs, sec_per_sample, val_seconds = 0, 0, None, None
+    step, full_epochs, val_seconds = 0, 0, None
+    # Training speed WITHOUT warm-up: the first batch of every epoch (worker start-up, CUDA
+    # init, cudnn.benchmark autotuning) is excluded from these running totals.
+    timed_s, timed_samples = 0.0, 0
     stop_reason = "max_epochs"
 
     def reserve() -> float:  # seconds kept for the final validation + checkpoint
-        if val_seconds is not None:
-            return 1.3 * val_seconds + SAVE_MARGIN_S
-        if sec_per_sample is None:
-            return SAVE_MARGIN_S
-        return 0.5 * sec_per_sample * len(val_ds) + SAVE_MARGIN_S
+        speed = timed_s / timed_samples if timed_samples else None
+        return reserve_seconds(val_seconds, speed, len(val_ds), window_s)
 
     def progress(now: float) -> float:
         used = now - train_start
@@ -550,10 +583,11 @@ def _train(
 
     for epoch in range(1, config.max_epochs + 1):
         model.train()
-        losses, seen, epoch_t0, finished_epoch = [], 0, time.monotonic(), True
-        for x, y in train_dl:
+        losses, epoch_t0, finished_epoch = [], time.monotonic(), True
+        last_end = epoch_t0
+        for batch_i, (x, y) in enumerate(train_dl):
             now = time.monotonic()
-            if deadline - now - reserve() <= 0:
+            if step > 0 and deadline - now - reserve() <= 0:  # never before the first batch
                 finished_epoch, stop_reason = False, "budget"
                 break
             for group in opt.param_groups:
@@ -573,12 +607,20 @@ def _train(
             scaler.step(opt)
             scaler.update()
             losses.append(loss.item())
-            seen += len(x)
             step += 1
-            sec_per_sample = (time.monotonic() - epoch_t0) / seen
+            end = time.monotonic()
+            if batch_i > 0:  # skip each epoch's warm-up batch; includes data-loading waits
+                timed_s += end - last_end
+                timed_samples += len(x)
+            last_end = end
         if not losses:  # no time left for even one batch of this epoch
             break
+        if not finished_epoch and full_epochs == 0:
+            # First epoch cut short: report a 0-epoch timeout (empty history), which the tools
+            # treat as "budget too small" and fail fast on. No partial validation.
+            break
         full_epochs += finished_epoch
+        train_s = time.monotonic() - epoch_t0  # measured before validation
 
         val_t0 = time.monotonic()
         preds = run_inference(
@@ -586,6 +628,7 @@ def _train(
         )
         val_score = score(card.task_type, preds)
         val_seconds = time.monotonic() - val_t0
+        timings.append({"train_s": round(train_s, 2), "val_s": round(val_seconds, 2)})
         history.append(
             EpochRecord(
                 epoch=epoch,
@@ -597,7 +640,7 @@ def _train(
         if val_score > best["score"]:
             best = {"score": val_score, "epoch": epoch, "preds": preds}
             save_checkpoint(run_dir / CKPT_NAME, model, config, card, spec, norm, val_score, epoch)
-        _write_json(run_dir / "history.json", [h.model_dump() for h in history])
+        _write_json(run_dir / "history.json", history_rows(history, timings))
         if not finished_epoch:
             break  # stop_reason already "budget"
         if progress(time.monotonic()) >= 1.0:
@@ -634,7 +677,7 @@ def _train(
             "normalisation": {"mean": norm[0].tolist(), "std": norm[1].tolist()},
         },
     )
-    _write_json(run_dir / "history.json", [h.model_dump() for h in history])
+    _write_json(run_dir / "history.json", history_rows(history, timings))
     return TrainResult(
         run_id=run_dir.name,
         task=config.task,

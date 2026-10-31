@@ -138,6 +138,7 @@ def main(argv: list[str] | None = None) -> None:
 
     history, best, step, t0 = [], 0.0, 0, time.time()
     for epoch in range(1, args.epochs + 1):
+        epoch_t0 = time.time()
         model.train()
         running = 0.0
         for x, y in train_dl:
@@ -153,11 +154,15 @@ def main(argv: list[str] | None = None) -> None:
             scaler.update()
             running += loss.item()
             step += 1
+        train_s = time.time() - epoch_t0  # measured before validation
         val_acc = evaluate(model, val_dl, args.img_size, device)
+        val_s = time.time() - epoch_t0 - train_s
         rec = {
             "epoch": epoch,
             "train_loss": round(running / len(train_dl), 4),
             "val_acc": round(val_acc, 4),
+            "train_s": round(train_s, 2),
+            "val_s": round(val_s, 2),
             "elapsed_s": round(time.time() - t0, 1),
         }
         history.append(rec)

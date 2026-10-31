@@ -58,7 +58,7 @@ Each entry: what, why, and the smallest change that would do it.
 - **Possible change (yours):** also accept names containing `_dev_` (e.g. `gotrain_dev_serena`)
   as dev homes, if you want fake runs to work there.
 
-## 6. Test-time augmentation flag on evaluate() (M6, needs a small interface change)
+## 6. Test-time augmentation flag on evaluate() (RESOLVED by contract v2)
 
 - **What exists:** `gotrain.engine.train.evaluate(task, checkpoint_path, split, tta=False)`.
   `tta=True` averages the model's outputs over the 8 flip/rot90 views (for segmentation, each
@@ -69,3 +69,59 @@ Each entry: what, why, and the smallest change that would do it.
   forwarding it; `FakeEngine.evaluate` can accept and ignore it.
 - **Rule to keep:** choose TTA on VALIDATION only (compare `evaluate(..., "val", tta=True)`
   with `tta=False`), then pass the same choice to `final_test`. Never decide it on test.
+
+## 7. contract v2 `predict()`: each checkpoint uses its own normalisation (approved by Serena)
+
+- **v2 says:** "The engine normalises (train-split band stats)".
+- **What the engine does:** `predict()` and `evaluate()` take raw images in the card's band
+  order, and **each checkpoint applies the normalisation it was trained with**:
+  - `imagenet` / `none`: the train-split z-score (exactly v2's wording);
+  - `ssl4eo_s2`: /10000, bands reordered BY NAME to TorchGeo's 13-band order, missing bands
+    zero-filled. That is how those weights were pretrained; z-scoring their input would
+    break them.
+  The caller sees no difference: raw images in, probabilities out. Ensembles may mix both
+  kinds; every member gets its own inputs (and its own `img_size`).
+- **Change needed:** none; perhaps reword v2 to "each checkpoint's own normalisation".
+
+## 8. contract v2 `per_sample` for multilabel tasks (approved by Serena; not one of our 4 tasks)
+
+- v2 defines `per_sample` for classification and segmentation only.
+- **What the engine does for multilabel:** `per_sample = {"tp": [...], "fp": [...], "fn":
+  [...]}`, one count per image (labels decided at probability 0.5); `score` = micro-F1 =
+  2·ΣTP / (2·ΣTP + ΣFP + ΣFN), `metric_name` stays `"f1"`. `predict()` returns sigmoid
+  `probabilities` [N, K] and 0/1 `labels` [N, K].
+- **Change needed:** add this to contract-v2.md if multilabel tasks (e.g. m-bigearthnet) are
+  ever used.
+
+
+## 9. m-chesapeake: ignore class 0 "no data"? DECIDED (Serena, 2026-10-31): no, extra metric only
+
+- **Verified:** class 0 is "no data", not land cover. GEO-Bench's converter reads the masks
+  through TorchGeo's `ChesapeakeCVPRDataModule(class_set=7)`, which keeps the raw Chesapeake
+  values (1 water … 6 impervious roads); TorchGeo fills out-of-raster areas with 0 and draws 0
+  as transparent. Class 0 is exactly 125 whole blank train tiles (8,192,000 px = 125 × 256²).
+  Names are now applied via `CLASS_NAME_FIXES` (0 no data, 1 water, …, 6 impervious roads).
+- **Proposed:** map class 0 to the loss's ignore index (no training signal from blank tiles),
+  never predict it (its probability set to 0), and exclude its pixels from intersection/union.
+- **Why it touches the contract:** v2's formula stays the same, but the number changes: class 0's
+  column in `per_sample` becomes all zeros (so v2's "classes with total union > 0" rule drops
+  it), and no-data pixels no longer count in other classes' unions. The chesapeake mIoU becomes
+  a 6-class mIoU, not comparable with a 7-class one or with the fake engine's.
+- **Decision: no.** `score` stays the official 7-class mIoU (comparable with GEO-Bench
+  baselines; no contract change) and training uses all 7 classes. Extra, clearly labelled
+  number: `miou_excl_nodata` (6 classes, pixels whose truth is class 0 removed; real pixels
+  predicted as class 0 still count as errors) in `metrics.json` and in `diagnose()`'s output,
+  driven by `NODATA_CLASSES` in `gotrain/engine/data.py`. Nothing changes for the tools.
+
+## 10. Task name: `m-chesapeake` on disk vs `m-chesapeake-landcover` in our docs. DECIDED: `m-chesapeake`
+
+- GEO-Bench's Hugging Face zip is `segmentation_v1.0/m-chesapeake.zip` and it unzips into a
+  folder named `m-chesapeake`; the task's own name is `m-chesapeake`. The real engine finds tasks
+  by that folder name, so `describe_dataset("m-chesapeake-landcover")` fails with
+  FileNotFoundError.
+- `docs/gameplan-changes.md` says "in code we use GEO-Bench's full name,
+  `m-chesapeake-landcover`", and `FakeEngine.CARDS` uses that key.
+- **Proposed:** use `m-chesapeake` everywhere (fake engine card, prompts, budgets). The engine
+  could alternatively accept an alias, but one name is simpler to audit.
+- **Decision (Serena, 2026-10-31):** use `m-chesapeake`, the real folder name; Hilal switches the
+  fake engine card and docs.

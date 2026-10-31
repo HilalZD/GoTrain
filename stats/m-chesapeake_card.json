@@ -1,0 +1,173 @@
+{
+  "task": "m-chesapeake",
+  "task_type": "segmentation",
+  "sensor": "aerial-rgbn",
+  "bands": [
+    "Red",
+    "Green",
+    "Blue",
+    "NearInfrared"
+  ],
+  "n_classes": 7,
+  "class_names": [
+    "no data",
+    "water",
+    "tree canopy",
+    "low vegetation",
+    "barren",
+    "impervious other",
+    "impervious roads"
+  ],
+  "image_size": [
+    256,
+    256
+  ],
+  "split_sizes": {
+    "train": 3000,
+    "val": 1000
+  },
+  "class_distribution": {
+    "no data": {
+      "count": 8192000,
+      "pct": 4.167
+    },
+    "water": {
+      "count": 24421460,
+      "pct": 12.421
+    },
+    "tree canopy": {
+      "count": 71818586,
+      "pct": 36.529
+    },
+    "low vegetation": {
+      "count": 63324728,
+      "pct": 32.209
+    },
+    "barren": {
+      "count": 9182883,
+      "pct": 4.671
+    },
+    "impervious other": {
+      "count": 13950520,
+      "pct": 7.096
+    },
+    "impervious roads": {
+      "count": 5717823,
+      "pct": 2.908
+    }
+  },
+  "band_mean": [
+    0.481318,
+    0.548404,
+    0.506569,
+    0.598219
+  ],
+  "band_std": [
+    0.187528,
+    0.159954,
+    0.135968,
+    0.264345
+  ],
+  "notes": [
+    "Class names corrected: geobench's class_names list does not match the label integers (see data_notes.md gotcha 22). Label order: 0 no data, 1 water, 2 tree canopy, 3 low vegetation, 4 barren, 5 impervious other, 6 impervious roads.",
+    "imbalance: class 'no data' is 4.17% of pixels",
+    "imbalance: class 'barren' is 4.67% of pixels",
+    "imbalance: class 'impervious roads' is 2.91% of pixels",
+    "largest/smallest class ratio is 13x: use class weights or Dice/focal loss, and report per-class metrics.",
+    "75 exact duplicate image(s) inside the sampled train set.",
+    "20 validation image(s) identical to a train image: val scores may be optimistic.",
+    "nodata (pixels where every band is exactly 0, plus NaN/inf values): 3.800% of pixels; excluded from stats."
+  ],
+  "dtype": [
+    "float32"
+  ],
+  "value_range": {
+    "Red": {
+      "min": 0.0,
+      "max": 1.0,
+      "p1": 0.125490203499794,
+      "p99": 0.9333333373069763
+    },
+    "Green": {
+      "min": 0.05882352963089943,
+      "max": 1.0,
+      "p1": 0.21568627655506134,
+      "p99": 0.9176470637321472
+    },
+    "Blue": {
+      "min": 0.01568627543747425,
+      "max": 1.0,
+      "p1": 0.239215686917305,
+      "p99": 0.886274516582489
+    },
+    "NearInfrared": {
+      "min": 0.0,
+      "max": 1.0,
+      "p1": 0.003921568859368563,
+      "p99": 0.929411768913269
+    }
+  },
+  "label_format": "mask 256x256 (int64), one class index per pixel",
+  "mask_unique_values": {
+    "values": {
+      "0": 8192000,
+      "1": 24421460,
+      "2": 71818586,
+      "3": 63324728,
+      "4": 9182883,
+      "5": 13950520,
+      "6": 5717823
+    },
+    "is_0_1": false,
+    "is_0_255": false,
+    "ignore_values": []
+  },
+  "nodata_fraction": 0.038,
+  "constant_bands": [],
+  "stats_n_samples": 2000,
+  "spatial_resolution_m": 1.0,
+  "native_band_resolution_m": {
+    "Red": 1,
+    "Green": 1,
+    "Blue": 1,
+    "NearInfrared": 1
+  },
+  "band_names_corrected": false,
+  "class_names_corrected": true,
+  "excluded_pixels": 4980736,
+  "example_sample": {
+    "name": "id_070382",
+    "shape_hwc": [
+      256,
+      256,
+      4
+    ],
+    "dtype": "float32",
+    "bands": [
+      {
+        "band": "Red",
+        "min": 0.22745098173618317,
+        "max": 0.9843137264251709,
+        "mean": 0.5032194979132782
+      },
+      {
+        "band": "Green",
+        "min": 0.21176470816135406,
+        "max": 0.9803921580314636,
+        "mean": 0.583687236371361
+      },
+      {
+        "band": "Blue",
+        "min": 0.37254902720451355,
+        "max": 0.9529411792755127,
+        "mean": 0.5310560820353203
+      },
+      {
+        "band": "NearInfrared",
+        "min": 0.20392157137393951,
+        "max": 0.886274516582489,
+        "mean": 0.7770801141627999
+      }
+    ]
+  }
+}

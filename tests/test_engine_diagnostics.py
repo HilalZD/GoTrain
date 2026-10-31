@@ -28,10 +28,13 @@ def repo_stats(monkeypatch):
 
 
 def have(task: str) -> bool:
+    """True only if geobench is importable AND the task is on disk (else data tests skip)."""
     try:
+        import geobench  # noqa: F401
+
         data.find_task_dir(task)
         return True
-    except FileNotFoundError:
+    except (ImportError, FileNotFoundError):
         return False
 
 
@@ -108,7 +111,7 @@ def _same_keys_as_fake(out: dict, tmp_path: Path, task: str) -> None:
     assert set(out) == set(fake.diagnose(task, run))
 
 
-@pytest.mark.skipif(not have("m-eurosat"), reason="m-eurosat not downloaded")
+@pytest.mark.skipif(not have("m-eurosat"), reason="needs geobench + m-eurosat on disk")
 def test_diagnose_eurosat_run(tmp_path):
     run = tmp_path / "m-eurosat-diag-0001"
     config = TrainConfig(
@@ -135,7 +138,7 @@ def test_diagnose_eurosat_run(tmp_path):
     assert summary["per_class_metric"] == "recall"
 
 
-@pytest.mark.skipif(not have("m-pv4ger-seg"), reason="m-pv4ger-seg not downloaded")
+@pytest.mark.skipif(not have("m-pv4ger-seg"), reason="needs geobench + m-pv4ger-seg on disk")
 def test_diagnose_pv4ger_run(tmp_path):
     run = tmp_path / "m-pv4ger-seg-diag-0001"
     config = TrainConfig(
@@ -155,3 +158,50 @@ def test_diagnose_pv4ger_run(tmp_path):
     assert set(out["per_class"]) == {"no solar pv", "solar pv"}
     assert summarize_diagnosis(out)["per_class_metric"] == "iou"
     assert Path(out["error_grid_path"]).name == "errors.png"
+
+
+# ------------------------------------------------------------------ miou_excl_nodata (request #9)
+def test_miou_excluding_nodata_by_hand():
+    # rows = truth (0 = no data), cols = prediction
+    cm = np.array([[50, 5, 5], [2, 8, 0], [0, 2, 8]])
+    got = engine.miou_excluding(cm, nodata=0)
+    iou1 = 8 / (10 + (8 + 2) - 8)  # row sum 10, predicted-1 among real truth = 8 + 2
+    iou2 = 8 / (10 + (0 + 8) - 8)
+    assert got == pytest.approx((iou1 + iou2) / 2)
+    official = engine.miou_from_confusion(cm)  # all 3 classes, as score
+    assert official != pytest.approx(got)
+
+
+def test_nodata_extras_only_for_tasks_with_a_nodata_class():
+    cm = np.eye(7, dtype=np.int64) * 10
+    assert engine.nodata_extras("m-pv4ger-seg", cm[:2, :2]) == {}
+    extras = engine.nodata_extras("m-chesapeake", cm)
+    assert extras == {"miou_excl_nodata": 1.0, "nodata_class": 0}
+
+
+@pytest.mark.skipif(not have("m-pv4ger-seg"), reason="needs geobench + m-pv4ger-seg on disk")
+def test_extra_metric_reaches_metrics_json_and_diagnose(tmp_path, monkeypatch):
+    """Wiring check on local data: pretend pv4ger's class 0 were a no-data class."""
+    import json
+
+    monkeypatch.setitem(engine.NODATA_CLASSES, "m-pv4ger-seg", 0)
+    run = tmp_path / "m-pv4ger-seg-nodata-0001"
+    config = TrainConfig(
+        task="m-pv4ger-seg",
+        backbone="resnet18",
+        weights="none",
+        img_size=64,
+        batch_size=16,
+        lr=1e-3,
+        max_epochs=1,
+        loss="dice_bce",
+        train_subset_frac=0.05,
+        reason="extra metric",
+    )
+    result = engine.train(config, 3.0, run)
+    metrics = json.loads((run / "metrics.json").read_text())
+    assert metrics["nodata_class"] == 0 and 0.0 <= metrics["miou_excl_nodata"] <= 1.0
+    assert metrics["val_score"] == result.val_score  # the official score is unchanged
+    out = engine.diagnose("m-pv4ger-seg", run)
+    assert out["miou_excl_nodata"] == metrics["miou_excl_nodata"]
+    assert summarize_diagnosis(out)["per_class_metric"] == "iou"  # Hilal's tool still works

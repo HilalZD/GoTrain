@@ -252,7 +252,11 @@ def diagnose(task: str, run_dir: Path) -> dict:
         grid = str(save_error_grid(run_dir / "errors.png", ckpt, preds, worst_indices(kind, preds)))
     except Exception as exc:  # the numbers are still useful without the picture
         (run_dir / "errors_failed.txt").write_text(f"{type(exc).__name__}: {exc}", "utf-8")
+    from gotrain.engine.train import nodata_extras
+
+    extras = nodata_extras(task, preds.get("confusion")) if kind == "segmentation" else {}
     return {
+        **extras,  # e.g. m-chesapeake: miou_excl_nodata (extra; NOT the official score)
         "task": task,
         "metric_name": ckpt["metric_name"],
         "class_names": names,

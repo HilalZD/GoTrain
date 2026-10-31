@@ -18,7 +18,12 @@ How one trial runs:
 
 Status: "ok" = at least one full epoch was trained and validated (stopping at the budget is
 the normal end of a time-budgeted trial); "timeout" = the budget ran out inside the first
-epoch (any checkpoint saved is still returned); "error" = anything else, with a message.
+epoch: empty history, no checkpoint (the tools fail fast on 0-epoch timeouts); "error" =
+anything else, with a message. The first batch always runs, and the time reserved for the
+final validation is estimated without warm-up batches and capped at half the training window.
+
+history.json rows = EpochRecord fields + train_s (training time of that epoch, measured
+before validation) and val_s (validation time), for planning time budgets.
 train() never raises.
 
 Metrics: accuracy (classification), micro-F1 "f1" (multilabel), mIoU "miou" (segmentation).
@@ -42,6 +47,7 @@ from gotrain.contracts import DatasetCard, EpochRecord, TrainConfig, TrainResult
 from gotrain.engine.combos import check_combo
 from gotrain.engine.data import (
     IGNORE_INDEX,
+    NODATA_CLASSES,
     TEST_SPLIT,
     GeoBenchDataset,
     describe_dataset,
@@ -60,7 +66,10 @@ LOSSES = {
 BINARY_SEG_LOSSES = ("bce", "dice_bce")  # one logit per pixel; needs exactly 2 classes
 WARMUP_FRACTION = 0.05
 SAVE_MARGIN_S = 3.0
+RESERVE_CAP = 0.5  # the validation reserve never takes more than half the training window
+VAL_COST_RATIO = 0.5  # before the first validation: a val sample ~ half a train sample's cost
 CKPT_NAME = "checkpoints/best.ckpt"
+EVAL_BATCH = 32
 
 
 # ---------------------------------------------------------------------------------------------
@@ -256,9 +265,18 @@ def _tta_views(x: Any) -> list[tuple[Any, Any]]:
     return views
 
 
-def forward(model: Any, x: Any, img_size: int, segmentation: bool, tta: bool) -> Any:
-    """Logits at the input's native size (segmentation) or per sample (classification)."""
+def class_probs(model: Any, x: Any, img_size: int, task_type: str, tta: bool = False) -> Any:
+    """Class probabilities for a batch of model inputs (already normalised).
+
+    classification: softmax, [N, K]          multilabel: sigmoid per class, [N, K]
+    segmentation:   [N, K, H, W] at the input's native size; a binary U-Net with one output
+                    channel p becomes the two classes [1 - p, p].
+    tta=True averages PROBABILITIES over the 8 flip/rot90 views; segmentation outputs are
+    rotated/flipped back before averaging. Every image is processed independently of the
+    rest of the batch (the model must be in eval mode).
+    """
     import torch
+    import torch.nn.functional as F
 
     native = x.shape[-2:]
     views = _tta_views(x) if tta and x.shape[-1] == x.shape[-2] else [(None, None)]
@@ -266,14 +284,21 @@ def forward(model: Any, x: Any, img_size: int, segmentation: bool, tta: bool) ->
     for fwd, back in views:
         xv = fwd(x) if fwd else x
         with amp(x.device):
-            out = model(resize(xv, img_size)).float()
-        if segmentation:
-            if out.shape[-2:] != native:
-                out = torch.nn.functional.interpolate(
-                    out, size=native, mode="bilinear", align_corners=False
-                )
-            out = back(out) if back else out
-        total = out if total is None else total + out
+            logits = model(resize(xv, img_size)).float()
+        if task_type == "segmentation":
+            if logits.shape[-2:] != native:
+                logits = F.interpolate(logits, size=native, mode="bilinear", align_corners=False)
+            if logits.shape[1] == 1:
+                p1 = torch.sigmoid(logits)
+                probs = torch.cat([1 - p1, p1], dim=1)
+            else:
+                probs = logits.softmax(1)
+            probs = back(probs) if back else probs
+        elif task_type == "multilabel":
+            probs = torch.sigmoid(logits)
+        else:
+            probs = logits.softmax(1)
+        total = probs if total is None else total + probs
     return total / len(views)
 
 
@@ -302,18 +327,17 @@ def run_inference(
     with torch.no_grad():
         for x, y in loader:
             x = x.to(device, non_blocking=True)
-            logits = forward(model, x, img_size, seg, tta)
+            probs_t = class_probs(model, x, img_size, task_type, tta)
             if task_type == "classification":
-                probs = logits.softmax(1).cpu().numpy()
+                probs = probs_t.cpu().numpy()
                 out["probs"].append(probs)
                 out["y_pred"].append(probs.argmax(1))
                 out["y_true"].append(y.numpy())
             elif task_type == "multilabel":
-                out["probs"].append(torch.sigmoid(logits).cpu().numpy())
+                out["probs"].append(probs_t.cpu().numpy())
                 out["y_true"].append(y.numpy())
             else:
-                pred = (logits[:, 0] > 0).long() if logits.shape[1] == 1 else logits.argmax(1)
-                pred, yt = pred.cpu().numpy(), y.numpy()
+                pred, yt = probs_t.argmax(1).cpu().numpy(), y.numpy()
                 for p_img, t_img in zip(pred, yt, strict=True):
                     valid = t_img != IGNORE_INDEX
                     cm = np.bincount(
@@ -345,6 +369,31 @@ def iou_per_class(confusion: np.ndarray) -> np.ndarray:
 def miou_from_confusion(confusion: np.ndarray) -> float:
     iou = iou_per_class(confusion)
     return float(np.nanmean(iou)) if np.isfinite(iou).any() else 0.0
+
+
+def miou_excluding(confusion: np.ndarray, nodata: int) -> float:
+    """Extra metric: mIoU over the other classes, with pixels whose TRUTH is `nodata` removed.
+
+    Pixels of real classes predicted as `nodata` still count as errors for their true class.
+    Not the official score (that keeps every class); reported next to it as miou_excl_nodata.
+    """
+    keep = [c for c in range(confusion.shape[0]) if c != nodata]
+    cm = np.delete(confusion, nodata, axis=0)  # drop no-data truth rows
+    tp = np.array([cm[i, c] for i, c in enumerate(keep)], dtype=np.float64)
+    union = cm.sum(axis=1) + cm[:, keep].sum(axis=0) - tp
+    present = union > 0
+    return float(np.mean(tp[present] / union[present])) if present.any() else 0.0
+
+
+def nodata_extras(task: str, confusion: np.ndarray | None) -> dict:
+    """{"miou_excl_nodata", "nodata_class"} for tasks with a no-data class, else {}."""
+    nodata = NODATA_CLASSES.get(task)
+    if nodata is None or confusion is None:
+        return {}
+    return {
+        "miou_excl_nodata": round(miou_excluding(confusion, nodata), 5),
+        "nodata_class": nodata,
+    }
 
 
 def micro_f1(y_true: np.ndarray, probs: np.ndarray, threshold: float = 0.5) -> float:
@@ -425,6 +474,25 @@ def checkpoint_dataset(ckpt: dict, split: str, allow_test: bool = False) -> GeoB
 # ---------------------------------------------------------------------------------------------
 # Training loop
 # ---------------------------------------------------------------------------------------------
+def reserve_seconds(
+    val_seconds: float | None, sec_per_sample: float | None, n_val: int, window_s: float
+) -> float:
+    """Seconds to keep free for the final validation + checkpoint.
+
+    Uses the measured validation time once there is one; before that, an estimate from the
+    training speed (which excludes warm-up batches, see the loop). Capped at RESERVE_CAP of
+    the training window (fixed when training starts), so a bad estimate can never eat the
+    whole budget.
+    """
+    if val_seconds is not None:
+        estimate = 1.3 * val_seconds
+    elif sec_per_sample is not None:
+        estimate = VAL_COST_RATIO * sec_per_sample * n_val
+    else:
+        estimate = 0.0
+    return min(estimate + SAVE_MARGIN_S, RESERVE_CAP * max(window_s, 0.0))
+
+
 def lr_factor(progress: float) -> float:
     """Linear warm-up for the first 5% of progress, then cosine decay to 0 at progress 1."""
     if progress < WARMUP_FRACTION:
@@ -457,6 +525,11 @@ def _loaders(train_ds: Any, val_ds: Any, batch_size: int, device: Any) -> tuple[
     )
     val_dl = DataLoader(val_ds, batch_size, num_workers=workers, pin_memory=pin)
     return train_dl, val_dl
+
+
+def history_rows(history: list[EpochRecord], timings: list[dict]) -> list[dict]:
+    """history.json rows: the contract's EpochRecord fields plus train_s and val_s."""
+    return [h.model_dump() | t for h, t in zip(history, timings, strict=True)]
 
 
 def _write_json(path: Path, obj: Any) -> None:
@@ -530,17 +603,19 @@ def _train(
     # --- loop ---
     max_steps = config.max_epochs * len(train_dl)
     train_start = time.monotonic()
+    window_s = deadline - train_start  # training window, fixed once (caps the reserve)
     history: list[EpochRecord] = []
+    timings: list[dict] = []  # per epoch: train_s, val_s (history.json extras)
     best = {"score": -1.0, "epoch": 0, "preds": None}
-    step, full_epochs, sec_per_sample, val_seconds = 0, 0, None, None
+    step, full_epochs, val_seconds = 0, 0, None
+    # Training speed WITHOUT warm-up: the first batch of every epoch (worker start-up, CUDA
+    # init, cudnn.benchmark autotuning) is excluded from these running totals.
+    timed_s, timed_samples = 0.0, 0
     stop_reason = "max_epochs"
 
     def reserve() -> float:  # seconds kept for the final validation + checkpoint
-        if val_seconds is not None:
-            return 1.3 * val_seconds + SAVE_MARGIN_S
-        if sec_per_sample is None:
-            return SAVE_MARGIN_S
-        return 0.5 * sec_per_sample * len(val_ds) + SAVE_MARGIN_S
+        speed = timed_s / timed_samples if timed_samples else None
+        return reserve_seconds(val_seconds, speed, len(val_ds), window_s)
 
     def progress(now: float) -> float:
         used = now - train_start
@@ -550,10 +625,11 @@ def _train(
 
     for epoch in range(1, config.max_epochs + 1):
         model.train()
-        losses, seen, epoch_t0, finished_epoch = [], 0, time.monotonic(), True
-        for x, y in train_dl:
+        losses, epoch_t0, finished_epoch = [], time.monotonic(), True
+        last_end = epoch_t0
+        for batch_i, (x, y) in enumerate(train_dl):
             now = time.monotonic()
-            if deadline - now - reserve() <= 0:
+            if step > 0 and deadline - now - reserve() <= 0:  # never before the first batch
                 finished_epoch, stop_reason = False, "budget"
                 break
             for group in opt.param_groups:
@@ -573,12 +649,20 @@ def _train(
             scaler.step(opt)
             scaler.update()
             losses.append(loss.item())
-            seen += len(x)
             step += 1
-            sec_per_sample = (time.monotonic() - epoch_t0) / seen
+            end = time.monotonic()
+            if batch_i > 0:  # skip each epoch's warm-up batch; includes data-loading waits
+                timed_s += end - last_end
+                timed_samples += len(x)
+            last_end = end
         if not losses:  # no time left for even one batch of this epoch
             break
+        if not finished_epoch and full_epochs == 0:
+            # First epoch cut short: report a 0-epoch timeout (empty history), which the tools
+            # treat as "budget too small" and fail fast on. No partial validation.
+            break
         full_epochs += finished_epoch
+        train_s = time.monotonic() - epoch_t0  # measured before validation
 
         val_t0 = time.monotonic()
         preds = run_inference(
@@ -586,6 +670,7 @@ def _train(
         )
         val_score = score(card.task_type, preds)
         val_seconds = time.monotonic() - val_t0
+        timings.append({"train_s": round(train_s, 2), "val_s": round(val_seconds, 2)})
         history.append(
             EpochRecord(
                 epoch=epoch,
@@ -597,7 +682,7 @@ def _train(
         if val_score > best["score"]:
             best = {"score": val_score, "epoch": epoch, "preds": preds}
             save_checkpoint(run_dir / CKPT_NAME, model, config, card, spec, norm, val_score, epoch)
-        _write_json(run_dir / "history.json", [h.model_dump() for h in history])
+        _write_json(run_dir / "history.json", history_rows(history, timings))
         if not finished_epoch:
             break  # stop_reason already "budget"
         if progress(time.monotonic()) >= 1.0:
@@ -622,6 +707,7 @@ def _train(
             "epochs_run": len(history),
             "full_epochs": full_epochs,
             "stop_reason": stop_reason,
+            **nodata_extras(config.task, (best["preds"] or {}).get("confusion")),
             "minutes_used": round(minutes, 3),
             "budget_minutes": budget_minutes,
             "n_train": len(train_ds),
@@ -634,7 +720,7 @@ def _train(
             "normalisation": {"mean": norm[0].tolist(), "std": norm[1].tolist()},
         },
     )
-    _write_json(run_dir / "history.json", [h.model_dump() for h in history])
+    _write_json(run_dir / "history.json", history_rows(history, timings))
     return TrainResult(
         run_id=run_dir.name,
         task=config.task,
@@ -651,39 +737,169 @@ def _train(
 # ---------------------------------------------------------------------------------------------
 # evaluate()
 # ---------------------------------------------------------------------------------------------
-def evaluate(task: str, checkpoint_path: Path, split: str, tta: bool = False) -> dict:
-    """Score a checkpoint on 'val' or the test split (the latter only via tools/final_test.py).
+def checkpoint_list(checkpoint_path: Path | str | list) -> list[Path]:
+    """One checkpoint or a list of them (an ensemble) -> a non-empty list of paths."""
+    paths = [checkpoint_path] if isinstance(checkpoint_path, str | Path) else list(checkpoint_path)
+    if not paths:
+        raise ValueError("no checkpoints given")
+    return [Path(p) for p in paths]
 
-    tta=True averages predictions over the 8 flip/rot90 views (test-time augmentation).
+
+def load_ensemble(task: str, checkpoint_path: Path | list, device: Any) -> list[tuple[dict, Any]]:
+    """Load every checkpoint (eval mode). Members must share task and class count; backbones,
+    weights, bands and image sizes may differ (each model gets its own inputs)."""
+    members = [load_checkpoint(p, device) for p in checkpoint_list(checkpoint_path)]
+    wrong = [c["task"] for c, _ in members if c["task"] != task]
+    if wrong:
+        raise ValueError(f"checkpoint(s) for {sorted(set(wrong))} cannot score task {task!r}")
+    if len({(c["n_classes"], c["task_type"]) for c, _ in members}) > 1:
+        counts = sorted({c["n_classes"] for c, _ in members})
+        raise ValueError(f"ensemble members disagree on the classes ({counts}); not combinable")
+    for _, model in members:
+        model.eval()
+    return members
+
+
+def checkpoint_inputs(raw: Any, ckpt: dict, bands: list[str]) -> Any:
+    """Raw images [N, C, H, W] (dataset units, channels = `bands`) -> this checkpoint's inputs.
+
+    Selects/reorders its bands by name, zero-fills the ones it expects but the task lacks
+    (ssl4eo_s2), and applies its own normalisation (train z-score, or /10000 for ssl4eo_s2),
+    exactly as GeoBenchDataset does during training.
+    """
+    import torch
+
+    zero = set(ckpt["spec"].get("zero_fill", []))
+    channels = [
+        torch.zeros_like(raw[:, 0]) if b in zero else raw[:, bands.index(b)]
+        for b in ckpt["spec"]["bands"]
+    ]
+    x = torch.stack(channels, dim=1)
+    mean = torch.tensor(ckpt["norm_mean"], dtype=x.dtype, device=x.device).view(1, -1, 1, 1)
+    std = torch.tensor(ckpt["norm_std"], dtype=x.dtype, device=x.device).view(1, -1, 1, 1)
+    return torch.nan_to_num((x - mean) / std, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def ensemble_probs(members: list, raw: Any, bands: list[str], tta: bool) -> Any:
+    """Average of every member's class probabilities (each with its own inputs and size)."""
+    total = None
+    for ckpt, model in members:
+        x = checkpoint_inputs(raw, ckpt, bands)
+        probs = class_probs(model, x, ckpt["config"]["img_size"], ckpt["task_type"], tta)
+        total = probs if total is None else total + probs
+    return total / len(members)
+
+
+def score_from_per_sample(task_type: str, per_sample: dict) -> float:
+    """The split's metric, computed only from per_sample (as contract v2 requires).
+
+    classification: mean(correct)
+    segmentation:   dataset-level mIoU: SUM intersection and union over all images per class,
+                    then average sum(I_k) / sum(U_k) over classes with sum(U_k) > 0
+                    (not the mean of per-image IoUs)
+    multilabel:     micro-F1 = 2 TP / (2 TP + FP + FN), summed over images
+    """
+    if task_type == "classification":
+        correct = per_sample["correct"]
+        return float(np.mean(correct)) if len(correct) else 0.0
+    if task_type == "segmentation":
+        inter = np.asarray(per_sample["intersection"], dtype=np.float64).sum(axis=0)
+        union = np.asarray(per_sample["union"], dtype=np.float64).sum(axis=0)
+        present = union > 0
+        return float(np.mean(inter[present] / union[present])) if present.any() else 0.0
+    tp, fp, fn = (float(np.sum(per_sample[k])) for k in ("tp", "fp", "fn"))
+    return 2 * tp / max(2 * tp + fp + fn, 1.0)
+
+
+def per_sample_batch(task_type: str, probs: np.ndarray, y: np.ndarray, k: int) -> dict:
+    """per_sample entries for one batch (lists, one item per image, in dataset order)."""
+    if task_type == "classification":
+        return {"correct": (probs.argmax(1) == y).astype(int).tolist()}
+    if task_type == "multilabel":
+        pred, true = probs > 0.5, y > 0.5
+        return {
+            "tp": (pred & true).sum(1).tolist(),
+            "fp": (pred & ~true).sum(1).tolist(),
+            "fn": (~pred & true).sum(1).tolist(),
+        }
+    pred = probs.argmax(1)
+    valid = y != IGNORE_INDEX
+    inter, union = [], []
+    for c in range(k):
+        p_c, t_c = pred == c, y == c
+        inter.append(((p_c & t_c) & valid).sum(axis=(1, 2)))
+        union.append(((p_c | t_c) & valid).sum(axis=(1, 2)))
+    return {
+        "intersection": np.stack(inter, axis=1).astype(int).tolist(),
+        "union": np.stack(union, axis=1).astype(int).tolist(),
+    }
+
+
+def evaluate(task: str, checkpoint_path: Path | list, split: str, tta: bool = False) -> dict:
+    """Contract v2: score one checkpoint or an ensemble on the FULL 'val' or test split.
+
+    The test split is only ever requested by tools/final_test.py. Ensembles average the
+    members' class probabilities; tta averages over the 8 flip/rot90 views. `score` is
+    computed from `per_sample` (see score_from_per_sample).
     """
     import torch
     from torch.utils.data import DataLoader
 
-    if split not in ("val", TEST_SPLIT):
+    if split not in ("val", TEST_SPLIT):  # engine names; data.py maps "val" to geobench "valid"
         raise ValueError(f"split must be 'val' or the test split, got {split!r}")
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    ckpt, model = load_checkpoint(checkpoint_path, device)
-    if ckpt["task"] != task:
-        raise ValueError(f"checkpoint is for {ckpt['task']!r}, not {task!r}")
-    ds = checkpoint_dataset(ckpt, split, allow_test=split == TEST_SPLIT)
-    loader = DataLoader(ds, ckpt["config"]["batch_size"], num_workers=0)
-    preds = run_inference(
-        model,
-        loader,
-        ckpt["task_type"],
-        ckpt["n_classes"],
-        ckpt["config"]["img_size"],
-        device,
-        tta=tta,
-    )
+    members = load_ensemble(task, checkpoint_path, device)
+    first = members[0][0]
+    kind, k = first["task_type"], first["n_classes"]
+    raw_ds = GeoBenchDataset(task, split, bands="all", norm="none", allow_test=split == TEST_SPLIT)
+    per_sample: dict[str, list] = {}
+    with torch.no_grad():
+        for raw, y in DataLoader(raw_ds, batch_size=EVAL_BATCH, num_workers=0):
+            probs = ensemble_probs(members, raw.to(device), raw_ds.bands, tta).cpu().numpy()
+            for key, values in per_sample_batch(kind, probs, y.numpy(), k).items():
+                per_sample.setdefault(key, []).extend(values)
     return {
         "task": task,
         "split": split,
-        "metric_name": ckpt["metric_name"],
-        "score": round(min(max(score(ckpt["task_type"], preds), 0.0), 1.0), 5),
-        "n_samples": len(ds),
+        "metric_name": first["metric_name"],
+        "score": round(min(max(score_from_per_sample(kind, per_sample), 0.0), 1.0), 5),
+        "n_samples": len(raw_ds),
+        "per_sample": per_sample,
+        "n_checkpoints": len(members),
         "tta": tta,
     }
+
+
+def predict(task: str, checkpoint_path: Path | list, images: np.ndarray, tta: bool = False) -> dict:
+    """Contract v2: predictions for caller-supplied images; reads no dataset split.
+
+    images: float N x C x H x W in the dataset's raw units, C and order = the card's bands.
+    Each checkpoint normalises them its own way. Returns numpy arrays:
+      probabilities float32 [N, K] or [N, K, H, W];  labels int64 [N] or [N, H, W]
+      (multilabel: labels are the 0/1 decisions at 0.5, [N, K]).
+    """
+    import torch
+
+    bands = list(describe_dataset(task).bands)
+    arr = np.asarray(images, dtype=np.float32)
+    if arr.ndim != 4 or arr.shape[1] != len(bands):
+        raise ValueError(
+            f"images must be N x {len(bands)} x H x W with bands in the order {bands}; "
+            f"got shape {arr.shape}"
+        )
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    members = load_ensemble(task, checkpoint_path, device)
+    chunks = []
+    with torch.no_grad():
+        for i in range(0, len(arr), EVAL_BATCH):
+            raw = torch.from_numpy(arr[i : i + EVAL_BATCH]).to(device)
+            chunks.append(ensemble_probs(members, raw, bands, tta).cpu().numpy())
+    probs = np.concatenate(chunks).astype(np.float32)
+    if members[0][0]["task_type"] == "multilabel":
+        labels = (probs > 0.5).astype(np.int64)
+    else:
+        labels = probs.argmax(1).astype(np.int64)
+    return {"probabilities": probs, "labels": labels, "n_checkpoints": len(members), "tta": tta}
 
 
 # Integration rule (Hilal): diagnose() lives in diagnostics.py; the agent side imports it from here.

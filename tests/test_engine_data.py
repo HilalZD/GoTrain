@@ -22,16 +22,21 @@ def recon(task: str) -> dict:
 
 
 def have_task(task: str) -> bool:
+    """True only if geobench is importable AND the task is on disk (else data tests skip)."""
     try:
+        import geobench  # noqa: F401
+
         data.find_task_dir(task)
         return True
-    except FileNotFoundError:
+    except (ImportError, FileNotFoundError):
         return False
 
 
-needs_eurosat = pytest.mark.skipif(not have_task("m-eurosat"), reason="m-eurosat not downloaded")
+needs_eurosat = pytest.mark.skipif(
+    not have_task("m-eurosat"), reason="needs geobench + m-eurosat on disk"
+)
 needs_pv4ger = pytest.mark.skipif(
-    not have_task("m-pv4ger-seg"), reason="m-pv4ger-seg not downloaded"
+    not have_task("m-pv4ger-seg"), reason="needs geobench + m-pv4ger-seg on disk"
 )
 
 
@@ -195,3 +200,50 @@ def test_pv4ger_mask_target():
     assert x.shape == (3, 320, 320)
     assert y.shape == (320, 320) and y.dtype == torch.long
     assert set(torch.unique(y).tolist()) <= {0, 1}
+
+
+# ------------------------------------------------------------------ brick-kiln and chesapeake cards
+@pytest.mark.parametrize("task", ["m-brick-kiln", "m-chesapeake"])
+def test_new_recon_cards_flatten_to_valid_contract(task):
+    card = data.to_dataset_card(recon(task))
+    assert DatasetCard.model_validate(card.model_dump()) == card
+    assert abs(sum(card.class_distribution.values()) - 1.0) < 1e-4  # pct stored to 3 decimals
+
+
+def test_chesapeake_class_names_are_corrected():
+    card = data.to_dataset_card(recon("m-chesapeake"))
+    assert card.class_names[0] == "no data" and card.class_names[1] == "water"
+    assert card.class_names[6] == "impervious roads"
+    assert card.class_distribution["no data"] == pytest.approx(0.0417, abs=1e-4)
+    assert card.sensor == "aerial-rgbn"
+    assert "Class names corrected" in card.notes and "no data" in card.notes
+    assert "20 validation image(s) identical" in card.notes
+    names, fixed = data.corrected_class_names("m-chesapeake", [str(i) for i in range(7)])
+    assert fixed and names == card.class_names
+
+
+def test_brick_kiln_card_warns_about_accuracy():
+    from gotrain.engine.combos import check_combo
+
+    card = data.to_dataset_card(recon("m-brick-kiln"))
+    assert "always predicting 'not brick kiln' already scores 66.4%" in card.notes
+    assert "F1/recall of 'brick kiln'" in card.notes
+    assert "Shortcut warning" in card.notes and "10.8%" in card.notes
+    assert "zero-filled (missing here): B06, B09, B10" in card.notes
+    assert check_combo(card, "resnet50", "ssl4eo_s2") is None  # sensor reads as Sentinel-2
+
+
+def test_majority_note_only_for_imbalanced_classification():
+    assert "Majority baseline" not in data.to_dataset_card(recon("m-eurosat")).notes
+    assert "Majority baseline" not in data.to_dataset_card(recon("m-pv4ger-seg")).notes
+
+
+def test_near_infrared_band_name_gives_rgbn_slug():
+    class SpectralBand:
+        def __init__(self, name):
+            self.name = name
+
+    class Task:
+        bands_info = [SpectralBand(n) for n in ("Red", "Green", "Blue", "NearInfrared")]
+
+    assert data.sensor(Task()) == "aerial-rgbn"

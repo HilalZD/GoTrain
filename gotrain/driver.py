@@ -17,9 +17,18 @@ from typing import Any
 
 from gotrain.agent import Phase, ToolCallLimit
 from gotrain.audit import AuditLog
+from gotrain.config import get_settings
 from gotrain.engine import get_engine
 from gotrain.engine.throughput import SCREEN_MINUTES
-from gotrain.tools._common import group_stats, load_entries, load_seed_groups, mean_std_text
+from gotrain.gopilot import export_model
+from gotrain.tools._common import (
+    group_stats,
+    load_entries,
+    load_seed_groups,
+    mean_std_text,
+    read_json,
+)
+from gotrain.tools.final_test import lock_key
 from gotrain.tools.memory import write_lesson
 from gotrain.tools.registry import list_versions, register_model
 from gotrain.tools.trials import budget_status
@@ -172,6 +181,31 @@ def write_session_lessons(agent: Any, audit: AuditLog, task: str) -> int:
     return written
 
 
+def export_for_gopilot(audit: AuditLog, task: str, version: str | None, when: str) -> None:
+    """Export the bundle (best effort: a failed export never fails the session)."""
+    if version is None:
+        return
+    out = export_model(task, version)
+    if "error" in out:
+        audit.log("gopilot_export_failed", version=version, when=when, error=out["error"])
+        audit.journal(f"**HARNESS:** GoPilot export of {version} failed: {out['error']}")
+        return
+    audit.log("gopilot_export", version=version, when=when, tool_name=out["tool_name"])
+    audit.journal(
+        f"**HARNESS: GoPilot export ({when}).** {task} {version} is now the MCP tool "
+        f"`{out['tool_name']}` (bundle `{out['bundle']}`, hash {out['version_hash']})."
+    )
+
+
+def finalised_version(task: str) -> str | None:
+    """The version final_test scored, if the test ran to the end."""
+    try:
+        lock = read_json(lock_key(task))
+    except (OSError, ValueError):
+        return None
+    return lock["version"] if lock.get("status") == "done" else None
+
+
 def run_session(
     agent: Any,
     audit: AuditLog,
@@ -199,6 +233,10 @@ def run_session(
         version = auto_register(task, audit)
         registered_by = "harness" if version else None
     lessons = write_session_lessons(agent, audit, task) if phase == "tune" else 0
+    if phase == "tune":
+        export_for_gopilot(audit, task, version, "after tune registration")
+    elif not get_settings().rehearsal:
+        export_for_gopilot(audit, task, finalised_version(task), "after finalise, with test score")
     return {
         "stop_reason": str(result.stop_reason),
         "continuations": continuations,

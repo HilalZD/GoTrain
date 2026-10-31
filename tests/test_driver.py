@@ -248,3 +248,32 @@ def test_harness_registered_session_also_writes_lessons():
 def test_finalise_writes_no_tune_lessons():
     session([[("text", "Nothing to do.")]], phase="finalise")
     assert tune_lessons() == []
+
+
+# ---------------------------------------------------------------- GoPilot export
+
+
+def test_tune_registration_exports_the_bundle_and_journals_the_tool_name(home):
+    script = [
+        [("tool", "run_trials", TRIAL)],
+        lambda: [("tool", "register_model", {"run_id": best_run_id()})],
+        [("text", "Done.")],
+    ]
+    outcome, events, audit = session(script)
+    (export,) = of(events, "gopilot_export")
+    assert export["tool_name"] == "classify_land_cover_eurosat" and export["version"] == "v1"
+    bundle = json.loads((home / "registry" / TASK / "v1" / "gopilot" / "bundle.json").read_text())
+    assert bundle["test"] is None
+    journal = (home / audit.journal_key).read_text(encoding="utf-8")
+    assert "`classify_land_cover_eurosat`" in journal
+
+
+def test_finalise_exports_again_with_the_test_score(home):
+    init_task_budget(TASK, 40)
+    register_model(run_trials(TASK, [make_config()], 2.0)["trials"][0]["run_id"])
+    script = [[("tool", "final_test", {"task": TASK, "version": "v1"})], [("text", "Done.")]]
+    outcome, events, _ = session(script, phase="finalise")
+    (export,) = of(events, "gopilot_export")
+    assert export["when"].startswith("after finalise")
+    bundle = json.loads((home / "registry" / TASK / "v1" / "gopilot" / "bundle.json").read_text())
+    assert 0 < bundle["test"]["test_score"] <= 1

@@ -4,6 +4,7 @@ Each takes/returns contract models or JSON-serializable dicts. The agent (Strand
 and the MCP server wrap these same functions.
 """
 
+from gotrain.tools.audit import audit_dataset
 from gotrain.tools.candidates import evaluate_candidates
 from gotrain.tools.diagnose import diagnose
 from gotrain.tools.final_test import final_test
@@ -14,6 +15,7 @@ from gotrain.tools.search import confirm_seeds, run_halving
 from gotrain.tools.trials import init_task_budget, leaderboard, promote, run_trials
 
 AGENT_TOOLS = [
+    audit_dataset,
     inspect_dataset,
     run_trials,
     run_halving,
@@ -30,6 +32,7 @@ AGENT_TOOLS = [
 
 __all__ = [
     "AGENT_TOOLS",
+    "audit_dataset",
     "confirm_seeds",
     "diagnose",
     "evaluate_candidates",

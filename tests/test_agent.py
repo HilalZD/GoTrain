@@ -77,6 +77,7 @@ def test_tune_tools_exclude_final_test():
     agent = build_agent(TASK, "tune", model=ScriptedModel([]))
     assert "final_test" not in agent.tool_names
     assert set(agent.tool_names) == {
+        "audit_dataset",
         "inspect_dataset",
         "run_halving",
         "run_trials",

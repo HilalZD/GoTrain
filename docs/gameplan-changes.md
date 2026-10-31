@@ -478,3 +478,7 @@ published references and the human baseline from `targets.json`.
 ## finalise --rehearsal
 
 `gotrain run --task T --phase finalise --rehearsal` (sets GOTRAIN_REHEARSAL=1) runs the whole finalise path on split="val": any home, no confirmation, no TEST_LOCK, no ledger. `final_test` then calls `rehearse()`: result in `registry/<task>/REHEARSAL.json`, a "REHEARSAL (val)" section on the model card, every output marked, lessons prefixed "REHEARSAL (val):" and tagged `rehearsal`. The real test stays available afterwards. Export copies REHEARSAL.json.
+
+## Data auditor tool
+
+`audit_dataset(task, apply_fixes=True)` wraps `gotrain.engine.audit.audit_dataset` (Serena). Cached in `registry/<task>/data_audit.json`, never charged to the GPU budget, in the tune toolset. `AuditGate` blocks run_trials/run_halving/promote/confirm_seeds until it has been read; the gate is on only with the real engine and once audit.py exists (so fake-engine tests and an unmerged auditor are unaffected). Tune prompt step 1 says to call it first.

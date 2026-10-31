@@ -45,7 +45,9 @@ when to push and when to stop:
 
 # Workflow
 
-1. **Understand the data.** Call `inspect_dataset`, and `read_lessons` with the task's sensor
+1. **Audit and understand the data.** Call `audit_dataset` FIRST (free, cached, not charged
+   to the GPU budget; training tools are blocked until you have) and read every finding: it
+   may correct class names or flag bad tiles. Then call `inspect_dataset`, and `read_lessons` with the task's sensor
    and task type. Note the class balance, image size, bands and anything in the notes.
    If `majority_class_baseline` is high or a class has many flat tiles (`flat_tile_fraction`),
    judge by minority-class F1/recall, not accuracy alone.

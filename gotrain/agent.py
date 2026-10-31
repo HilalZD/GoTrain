@@ -31,6 +31,7 @@ from gotrain.audit import AuditLog, result_error, result_text
 from gotrain.config import Settings, get_settings
 from gotrain.contracts import TrainConfig
 from gotrain.tools import (
+    audit_dataset,
     confirm_seeds,
     diagnose,
     evaluate_candidates,
@@ -44,6 +45,7 @@ from gotrain.tools import (
     run_trials,
     write_lesson,
 )
+from gotrain.tools.audit import audit_available
 from gotrain.tools.candidates import MAX_CALLS_PER_SESSION, SELECTION_RULES
 from gotrain.tools.diagnose import OBSERVATION_MARKERS, diagnose_for_model
 from gotrain.tools.registry import list_versions, load_version
@@ -53,6 +55,7 @@ Phase = Literal["tune", "finalise"]
 PROMPTS_DIR = Path(__file__).parent / "prompts"
 PHASE_TOOLS = {
     "tune": [
+        audit_dataset,
         inspect_dataset,
         run_halving,
         run_trials,
@@ -147,6 +150,38 @@ class SelectionQuota(HookProvider):
         result = event.result
         if result.get("status") == "success" and not result_error(result, result_text(result)):
             self.used += 1
+
+
+TRAINING_TOOLS = {"run_trials", "run_halving", "promote", "confirm_seeds"}
+
+
+class AuditGate(HookProvider):
+    """No training tool runs before audit_dataset has returned its findings this session."""
+
+    def __init__(self, audit: AuditLog):
+        self.audit = audit
+        self.done = False
+
+    def register_hooks(self, registry: HookRegistry, **kwargs: Any) -> None:
+        registry.add_callback(BeforeToolCallEvent, self._before_tool)
+        registry.add_callback(AfterToolCallEvent, self._after_tool)
+
+    def _before_tool(self, event: BeforeToolCallEvent) -> None:
+        if self.done or event.tool_use["name"] not in TRAINING_TOOLS:
+            return
+        event.cancel_tool = (
+            "Blocked: call audit_dataset on this task and read its findings before your first "
+            "trial. It is free (not charged to the GPU budget)."
+        )
+        self.audit.log("audit_gate_enforced", tool=event.tool_use["name"])
+
+    def _after_tool(self, event: AfterToolCallEvent) -> None:
+        if event.tool_use["name"] != "audit_dataset" or event.cancel_message:
+            return
+        result = event.result
+        if result.get("status") == "success" and not result_error(result, result_text(result)):
+            self.done = True
+            self.audit.log("audit_read")
 
 
 class ObservationGate(HookProvider):
@@ -276,6 +311,7 @@ def build_agent(
     max_tool_calls: int | None = None,
     model: Model | None = None,
     limit: ToolCallLimit | None = None,
+    require_audit: bool | None = None,
 ) -> Agent:
     """A ready-to-run agent for one task and phase.
 
@@ -289,6 +325,10 @@ def build_agent(
     hooks: list[HookProvider] = [audit, limit]
     if phase == "tune":  # diagnose and evaluate_candidates only exist in tune
         hooks += [ObservationGate(audit), SelectionQuota(audit)]
+        if require_audit is None:  # real engine only, and only once the auditor is merged
+            require_audit = get_settings().engine == "real" and audit_available()
+        if require_audit:
+            hooks.append(AuditGate(audit))
     return Agent(
         model=model or build_model(get_settings()),
         tools=[to_strands_tool(fn) for fn in PHASE_TOOLS[phase]],

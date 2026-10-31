@@ -17,6 +17,7 @@ dependencies = [
     "mcp",
     "rich",
     "pyyaml",
+    "rasterio",  # the models MCP server reads and writes GeoTIFFs
     # unpinned so an install never replaces the instance's versions (numpy 2.5.4)
     "numpy",
     "pillow",

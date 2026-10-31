@@ -30,14 +30,18 @@ CPU only. Reads TRAIN and VAL only, never the test split. Writes nothing.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
+import time
 from collections import Counter
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from gotrain.engine import data
 
+AUDIT_VERSION = 1  # bump when checks change: invalidates every cached audit
 S2_RE = re.compile(r"^b?0?(\d{1,2})(a?)\b")
 ROLE_WORDS = {
     "red": "red",
@@ -392,9 +396,48 @@ def _ratio(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return np.where(np.isfinite(r), r, np.nan)
 
 
+def tile_hash(arr: np.ndarray) -> str:
+    """Hash of a tile as float32, so the .npy cache (float32) and hdf5 (int16, uint8, float64...)
+    give the same hash for the same image: mixing sources can't hide a train/val duplicate."""
+    return hashlib.md5(np.ascontiguousarray(arr, dtype=np.float32).tobytes()).hexdigest()
+
+
 def _hashes(ds: Any, limit: int | None) -> list[str]:
+    """Hashes of the first `limit` tiles (all by default); from the memory-mapped data cache
+    when the split has one (fast sequential reads), else one hdf5 file per tile."""
     n = len(ds) if limit is None else min(limit, len(ds))
-    return [hashlib.md5(np.ascontiguousarray(ds.raw(i)[0]).tobytes()).hexdigest() for i in range(n)]
+    if ds.disk_cache is not None:
+        x = ds.disk_cache[0]
+        return [tile_hash(x[ds.indices[i]]) for i in range(n)]
+    return [tile_hash(ds.raw(i)[0]) for i in range(n)]
+
+
+def _label_counts(ds: Any, kind: str) -> Counter:
+    """Per-class counts over a whole split: from the cached labels if present, else hdf5."""
+    if ds.disk_cache is None:
+        return data._label_counts(ds.ds, kind)
+    y = np.asarray(ds.disk_cache[1])
+    if kind == "segmentation":
+        vals, cnt = np.unique(y, return_counts=True)
+        return Counter({int(v): int(c) for v, c in zip(vals, cnt, strict=True)})
+    if kind == "multilabel":
+        return Counter({int(c): int(n) for c, n in enumerate(y.sum(axis=0)) if n})
+    return Counter(int(v) for v in y.reshape(-1))
+
+
+def audit_fingerprint(task: str, train: Any, val: Any, settings: dict) -> str:
+    """Same split fingerprints as the data cache, plus the audit settings and version."""
+    parts = [
+        AUDIT_VERSION,
+        settings,
+        data.split_fingerprint(task, "train", train.ds, train.all_bands),
+        data.split_fingerprint(task, "val", val.ds, val.all_bands),
+    ]
+    return hashlib.sha256(json.dumps(parts, sort_keys=True).encode()).hexdigest()
+
+
+def _audit_cache_path(task: str, apply_fixes: bool) -> Path:
+    return data.cache_root() / task / f"audit_{'fixed' if apply_fixes else 'raw'}.json"
 
 
 def audit_dataset(
@@ -404,13 +447,34 @@ def audit_dataset(
     n_samples: int = 300,
     leak_limit: int | None = None,
     seed: int = 0,
+    use_cache: bool = True,
 ) -> dict:
-    """Audit one task on TRAIN (+ VAL labels and hashes). See the module docstring."""
+    """Audit one task on TRAIN (+ VAL labels and hashes). See the module docstring.
+
+    The result is cached in <data cache>/<task>/audit_{fixed,raw}.json and reused while the
+    split fingerprints (same as the data cache) and the settings are unchanged.
+    """
+    t0 = time.monotonic()
     gtask = data.load_task(task, data_dir)
     kind = data.task_type(gtask)
     k = int(gtask.label_type.n_classes)
     train = data.GeoBenchDataset(task, "train", norm="none", data_dir=data_dir)
     val = data.GeoBenchDataset(task, "val", norm="none", data_dir=data_dir)
+    settings = {
+        "apply_fixes": apply_fixes,
+        "n_samples": n_samples,
+        "leak_limit": leak_limit,
+        "seed": seed,
+    }
+    fingerprint = audit_fingerprint(task, train, val, settings)
+    cache_path = _audit_cache_path(task, apply_fixes)
+    if use_cache and cache_path.exists():
+        try:
+            saved = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            saved = {}
+        if saved.get("fingerprint") == fingerprint:
+            return saved["result"] | {"cached": True}
     raw_bands = data.sample_array(train.ds[0])[1]
     raw_classes = data.raw_class_names(gtask, k)
     bands = data.channel_names(task, raw_bands)[0] if apply_fixes else list(raw_bands)
@@ -488,14 +552,16 @@ def audit_dataset(
         for c in range(k)
         if any(c in t for t in tile_classes)
     }
-    train_counts = Counter(data._label_counts(train.ds, kind))
+    train_counts = _label_counts(train, kind)
     train_counts["_n"] = len(train)
     majority = data.majority_class_baseline(
-        kind, train_counts, data._label_counts(val.ds, kind), len(val), classes
+        kind, train_counts, _label_counts(val, kind), len(val), classes
     )
     findings += check_shortcuts(majority, flat, nod, ndvi_by_class)
 
+    t_hash = time.monotonic()
     th, vh = _hashes(train, leak_limit), _hashes(val, leak_limit)
+    hash_s = time.monotonic() - t_hash
     dup_train = len(th) - len(set(th))
     in_train = sum(h in set(th) for h in vh)
     findings += check_leaks(len(th), dup_train, len(vh), in_train)
@@ -504,7 +570,7 @@ def audit_dataset(
 
     order = {"error": 0, "warning": 1, "info": 2}
     findings.sort(key=lambda f: order[f["severity"]])
-    return {
+    result = {
         "task": task,
         "apply_fixes": apply_fixes,
         "task_type": kind,
@@ -515,4 +581,20 @@ def audit_dataset(
         "ndvi_by_class": {c: round(v, 4) for c, v in ndvi_by_class.items()},
         "findings": findings,
         "summary": dict(Counter(f["severity"] for f in findings)),
+        "timing": {
+            "total_s": round(time.monotonic() - t0, 1),
+            "hash_s": round(hash_s, 1),
+            "hash_source": {
+                "train": "data cache" if train.disk_cache is not None else "hdf5",
+                "val": "data cache" if val.disk_cache is not None else "hdf5",
+            },
+        },
     }
+    if use_cache:
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {"fingerprint": fingerprint, "result": result}
+            cache_path.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        except OSError:
+            pass  # a read-only cache folder must not break the audit
+    return result | {"cached": False}

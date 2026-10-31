@@ -10,6 +10,15 @@ import pytest
 from gotrain.engine import audit, data
 
 
+@pytest.fixture(scope="module", autouse=True)
+def isolated_cache_root(tmp_path_factory):
+    """Audits cache their results under the data cache root: never the real ~/data_cache."""
+    mp = pytest.MonkeyPatch()
+    mp.setenv("GOTRAIN_DATA_CACHE", str(tmp_path_factory.mktemp("audit_cache_root")))
+    yield
+    mp.undo()
+
+
 def have(task: str) -> bool:
     try:
         import geobench  # noqa: F401
@@ -187,3 +196,44 @@ def test_rgb_pv4ger_has_no_false_alarms():
     out = audit.audit_dataset("m-pv4ger-seg", n_samples=150, leak_limit=400)
     assert not [f for f in out["findings"] if f["severity"] in ("error", "warning")]
     assert any("No NIR band" in f["suggestion"] for f in out["findings"])
+
+
+# ------------------------------------------------------------------ speed: hashing + result cache
+def test_tile_hash_is_the_same_for_every_storage_dtype():
+    """The data cache stores float32, hdf5 stores int16/uint8/float64: same image, same hash."""
+    tile = np.arange(64 * 64 * 3).reshape(64, 64, 3) % 251
+    hashes = {audit.tile_hash(tile.astype(t)) for t in (np.int16, np.uint8, np.float32, np.float64)}
+    assert len(hashes) == 1
+
+
+@pytest.fixture
+def tmp_cache_root(monkeypatch, tmp_path):
+    monkeypatch.setenv("GOTRAIN_DATA_CACHE", str(tmp_path / "cache"))
+    return tmp_path / "cache"
+
+
+@needs_eurosat
+def test_hashes_from_data_cache_match_hdf5(tmp_cache_root):
+    data.build_split_cache("m-eurosat", "val")
+    cached = data.GeoBenchDataset("m-eurosat", "val", norm="none")
+    direct = data.GeoBenchDataset("m-eurosat", "val", norm="none", use_cache=False)
+    assert cached.disk_cache is not None
+    assert audit._hashes(cached, 60) == audit._hashes(direct, 60)
+    assert audit._label_counts(cached, "classification") == audit._label_counts(
+        direct, "classification"
+    )
+
+
+@needs_eurosat
+def test_audit_result_is_cached_and_invalidated(tmp_cache_root):
+    kw = {"n_samples": 40, "leak_limit": 100}
+    first = audit.audit_dataset("m-eurosat", **kw)
+    again = audit.audit_dataset("m-eurosat", **kw)
+    assert first["cached"] is False and again["cached"] is True
+    assert again["findings"] == first["findings"]
+    assert (tmp_cache_root / "m-eurosat" / "audit_fixed.json").exists()
+    other = audit.audit_dataset("m-eurosat", n_samples=41, leak_limit=100)  # new settings
+    assert other["cached"] is False
+    raw = audit.audit_dataset("m-eurosat", apply_fixes=False, **kw)  # separate file per mode
+    assert raw["cached"] is False and (tmp_cache_root / "m-eurosat" / "audit_raw.json").exists()
+    assert audit.audit_dataset("m-eurosat", use_cache=False, **kw)["cached"] is False

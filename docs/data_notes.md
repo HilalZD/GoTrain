@@ -153,6 +153,22 @@ Measured on SageMaker (`explore.py`, seed 0, stats on 2,000 train images; figure
 - **Duplicates:** 75 inside the sampled train set; **20 val images identical to a train image** (gotcha 24).
 - **Visual check:** masks are aligned with the images (roads at the same pixels). Some masks have hand-drawn straight edges (e.g. a barren polygon over grass in #808), so IoU for barren / impervious / roads is capped by label noise.
 
+### GEO-Bench reference scores vs ours
+Best published baseline per task, from GEO-Bench's own results files (`baseline_classification_results.csv`, `baseline_segmentation_results.csv` in [ServiceNow/geo-bench](https://github.com/ServiceNow/geo-bench), main at commit `17cac9b`; the CSVs last changed in `5a5a763`, 2024-01-15). Reproduced with the repo's own method (`geobench/baseline_results.ipynb`: `plot_tools.extract_1x_data` keeps runs on 100% of train, then `avergage_seeds` takes the mean over seeds). "Best" = highest mean **test** score.
+
+| task | metric | best published model | GEO-Bench test (mean, seeds) | GEO-Bench val (same runs) | ours (val) |
+|---|---|---|---|---|---|
+| m-eurosat | accuracy | ResNet18-MoCo-S2 | 0.980 (12 seeds) | 0.982 | **0.986** (M2: SSL4EO ResNet50 MoCo, 224 px) |
+| m-brick-kiln | accuracy | ConvNeXt-B-timm | 0.989 (12 seeds) | 0.993 | |
+| m-pv4ger-seg | mIoU | ResNet18-U-Net-timm (ResNet101-U-Net ties at 0.941) | 0.941 (12 seeds) | 0.947 | **0.959** (M3: U-Net, ImageNet ResNet-34) |
+| m-chesapeake | mIoU | ResNet50-U-Net-timm | 0.711 (12 seeds) | 0.727 | |
+
+How to read it:
+- **Compare our val with their val column.** Their headline numbers are TEST scores averaged over ~12 seeds; ours are single-run VAL scores. Our test scores come only once, from `final_test`.
+- Our M2/M3 numbers are SageMaker runs reported by Serena (2026-10-31); their metrics.json files are not in the repo.
+- The CSVs don't name the segmentation metric; the paper reports mIoU for segmentation. Chesapeake's 0.711 is the all-class score, the same definition as our official `score` (decision #9).
+- Model names are as written in the CSV. The runners-up on eurosat are close: ResNet50-MoCo-S2 0.978, ResNet50-SECO-S2 0.977, ConvNeXt-B 0.977.
+
 ## 5. Gotchas for training (things `train.py` must handle)
 
 1. **`get_dataset()` silently gives you 3 bands.** `TaskSpecifications.get_dataset(band_names=...)` defaults to `("red", "green", "blue")`, so a 13-band dataset quietly becomes RGB-only. On a dataset with no RGB alt names it crashes instead. Always pass `band_names=[bi.name for bi in task.bands_info]` (as `_open_split` does).

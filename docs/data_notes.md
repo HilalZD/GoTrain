@@ -153,6 +153,29 @@ Measured on SageMaker (`explore.py`, seed 0, stats on 2,000 train images; figure
 - **Duplicates:** 75 inside the sampled train set; **20 val images identical to a train image** (gotcha 24).
 - **Visual check:** masks are aligned with the images (roads at the same pixels). Some masks have hand-drawn straight edges (e.g. a barren polygon over grass in #808), so IoU for barren / impervious / roads is capped by label noise.
 
+### Data loading speed (brick-kiln has 15,063 train tiles)
+Measured with `scratch/speed_check.py` on this laptop's CPU, 300 m-eurosat train tiles as a proxy (same 64x64x13 hdf5 tiles; brick-kiln itself didn't fit on the laptop), scaled to a 15,063-tile epoch:
+
+| step (per tile) | laptop CPU | per brick-kiln epoch |
+|---|---|---|
+| load: hdf5 read + pack + normalise, 1 process | 7.75 ms | 117 s (~29 s with 4 DataLoader workers, if they scale) |
+| train resnet18 @ 64 px | 16 ms | 243 s |
+| train resnet50 @ 64 px | 44 ms | 668 s |
+| train resnet18 @ 224 px | 104 ms | 1,568 s |
+| train resnet50 @ 224 px | 348 ms | 5,246 s |
+
+- **On CPU, training dominates** (load/train 0.02-0.48).
+- **On the T4 the picture flips (estimate, not measured):** the GPU trains a 64 px resnet18 tile in well under 1 ms and a 224 px resnet50 tile in roughly 3-4 ms, while loading stays CPU work at ~2 ms/tile even with 4 workers. So for 64 px trials **loading would dominate**, about 30 s of a ~40 s epoch, and it is comparable at 224 px. Brick-kiln stores float64, 4x eurosat's int16 bytes, so its reads may be slower still.
+- **Measure it for real on SageMaker:** `scratch/speed_check.py m-brick-kiln --n 300` (GPU free, PYTHONPATH inline). If load/train > ~0.5 for the configs the agent uses, build the cache below.
+
+**Proposal (not built): one-time `.npy` cache under `~/data_cache`.**
+- `~/data_cache/<task>/{train,val}_x.npy` (float32, N x C x H x W, all bands in card order, unnormalised), `{train,val}_y.npy`, plus `meta.json` (bands, sample names, source folder, geobench version, created_at).
+- Built once per task by a small script (a few minutes for brick-kiln). Size: 3.2 GB train + 0.2 GB val for brick-kiln.
+- `GeoBenchDataset(..., cache_dir=...)` would read rows with `np.load(..., mmap_mode="r")`: no per-tile hdf5 parsing, page-cached after the first epoch, and safe with several DataLoader workers. Normalisation, band selection and zero-fill stay exactly as today, on the fly.
+- Falls back to hdf5 if the cache is missing or `meta.json` doesn't match (bands, counts, source path).
+- **The test split is never cached.** `evaluate(..., test)` keeps reading hdf5 through the guarded path, so the cache can't become a side door to test data.
+- Outside the repo and outside `~/data`, so it never touches Hilal's files or the shared dataset.
+
 ### GEO-Bench reference scores vs ours
 Best published baseline per task, from GEO-Bench's own results files (`baseline_classification_results.csv`, `baseline_segmentation_results.csv` in [ServiceNow/geo-bench](https://github.com/ServiceNow/geo-bench), main at commit `17cac9b`; the CSVs last changed in `5a5a763`, 2024-01-15). Reproduced with the repo's own method (`geobench/baseline_results.ipynb`: `plot_tools.extract_1x_data` keeps runs on 100% of train, then `avergage_seeds` takes the mean over seeds). "Best" = highest mean **test** score.
 

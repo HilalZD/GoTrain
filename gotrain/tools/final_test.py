@@ -27,7 +27,12 @@ def lock_key(task: str) -> str:
 
 @tool
 def final_test(task: str, version: str) -> dict:
-    """One-time TEST score of registry/<task>/<version>. Refuses if the task was tested."""
+    """One-time TEST score of registry/<task>/<version>. Refuses if the task was tested.
+
+    Args:
+        task: GEO-Bench task name.
+        version: Registered version to score, e.g. "v2".
+    """
     if storage().exists(lock_key(task)):
         return error(
             f"the test set for {task} has already been used; it can only be scored once",

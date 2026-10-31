@@ -29,3 +29,10 @@ def test_final_test_is_where_the_test_split_is_requested():
 
 def test_no_module_shadows_stdlib_logging():
     assert not (PKG / "logging.py").exists()
+
+
+def test_nothing_imports_strands_tools():
+    """strands_tools is preinstalled on SageMaker but incompatible with strands 1.63.0."""
+    pattern = re.compile(r"^\s*(import|from)\s+strands_tools\b", re.MULTILINE)
+    offenders = [str(p) for p in code_files() if pattern.search(p.read_text(encoding="utf-8"))]
+    assert not offenders

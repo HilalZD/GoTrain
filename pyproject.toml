@@ -9,7 +9,7 @@ description = "An AI agent that trains geospatial models on GEO-Bench by itself.
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "strands-agents",
+    "strands-agents==1.63.0",  # verified on SageMaker; newer versions untested
     "geobench",
     "pydantic>=2",
     "pydantic-settings>=2",
@@ -33,8 +33,14 @@ dev = [
     "ruff",
 ]
 
+[project.scripts]
+gotrain = "gotrain.cli:main"
+
 [tool.setuptools.packages.find]
 include = ["gotrain*"]
+
+[tool.setuptools.package-data]
+gotrain = ["prompts/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

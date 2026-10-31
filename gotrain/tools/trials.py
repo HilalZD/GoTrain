@@ -174,6 +174,11 @@ def run_trials(task: str, configs: list[dict], budget_minutes_per_trial: float) 
 
     Invalid configs are reported with the reason and skipped; the rest still run.
     A trial that would exceed the remaining budget is not started.
+
+    Args:
+        task: GEO-Bench task name, e.g. "m-eurosat".
+        configs: List of training configs (see the field list below). "task" may be omitted.
+        budget_minutes_per_trial: GPU minutes each trial may use; charged to the task budget.
     """
     if not isinstance(configs, list) or not configs:
         return error("configs must be a non-empty list of config objects", "Pass 1-6 configs.")
@@ -211,7 +216,12 @@ def run_trials(task: str, configs: list[dict], budget_minutes_per_trial: float) 
 
 @tool
 def promote(run_id: str, extra_budget_minutes: float) -> dict:
-    """Re-train a run's exact config with its budget + extra_budget_minutes, as a child run."""
+    """Re-train a run's exact config with its budget + extra_budget_minutes, as a child run.
+
+    Args:
+        run_id: A successful run that stopped before max_epochs (from run_trials/leaderboard).
+        extra_budget_minutes: Minutes added to the parent's per-trial budget.
+    """
     parent = find_entry(run_id)
     if parent is None:
         return unknown_run(run_id)
@@ -256,7 +266,12 @@ def promote(run_id: str, extra_budget_minutes: float) -> dict:
 
 @tool
 def leaderboard(task: str, top_k: int = 10) -> dict:
-    """The task's runs ranked by val score: config summary, score, minutes, status, parent."""
+    """The task's runs ranked by val score: config summary, score, minutes, status, parent.
+
+    Args:
+        task: GEO-Bench task name.
+        top_k: How many runs to return (1-100).
+    """
     if not isinstance(top_k, int) or not 1 <= top_k <= 100:
         return error(f"top_k must be an integer from 1 to 100, got {top_k!r}", "Use top_k=10.")
     entries = rank(load_entries(task))

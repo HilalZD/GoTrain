@@ -50,7 +50,13 @@ def matching_lessons(tags: list[str]) -> list[dict]:
 
 @tool
 def write_lesson(task: str, lesson: str, tags: list[str]) -> dict:
-    """Append a dated, tagged lesson to memory/lessons.md."""
+    """Append a dated, tagged lesson to memory/lessons.md.
+
+    Args:
+        task: The task the lesson was learned on.
+        lesson: One concrete, reusable finding with its evidence (1-3 sentences).
+        tags: e.g. sensor, task_type and resolution: ["sentinel-2", "classification", "64px"].
+    """
     if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
         return error("tags must be a list of strings", 'e.g. ["sentinel-2", "classification"]')
     clean_tags = normalize_tags(tags)
@@ -74,7 +80,12 @@ def write_lesson(task: str, lesson: str, tags: list[str]) -> dict:
 
 @tool
 def read_lessons(tags: list[str], task: str | None = None) -> dict:
-    """Lessons sharing any of `tags`, newest first. Pass `task` to get its budget back."""
+    """Lessons sharing any of `tags`, newest first. Pass `task` to get its budget back.
+
+    Args:
+        tags: Tags to match (any overlap), e.g. ["sentinel-2"]; [] returns all lessons.
+        task: Optional current task name, only used to report its budget.
+    """
     if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
         return error("tags must be a list of strings", 'e.g. ["sentinel-2"], or [] for all')
     lessons = matching_lessons(tags)

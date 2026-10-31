@@ -35,7 +35,11 @@ def summarize_card(card: DatasetCard) -> dict:
 
 @tool
 def inspect_dataset(task: str) -> dict:
-    """DatasetCard summary for `task` and the lessons tagged with its sensor or task type."""
+    """DatasetCard summary for `task` and the lessons tagged with its sensor or task type.
+
+    Args:
+        task: GEO-Bench task name, e.g. "m-eurosat".
+    """
     try:
         card = get_engine().describe_dataset(task)
     except (ValueError, FileNotFoundError) as exc:

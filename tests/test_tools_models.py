@@ -229,3 +229,25 @@ def test_diagnose_summary_picks_metric_by_name_not_order(metrics, expected):
     out = summarize_diagnosis(raw)
     assert out["per_class_metric"] == expected
     assert out["weakest_classes"] == {"b": metrics[expected] / 2, "a": metrics[expected]}
+
+
+def test_registering_a_seed_group_member_registers_the_original_run_with_mean_headline(budget):
+    from gotrain.tools import confirm_seeds, leaderboard
+    from gotrain.tools._common import load_seed_groups
+
+    base = one_run()
+    confirm_seeds(base, 3)
+    group = next(iter(load_seed_groups(TASK).values()))
+    other = next(r for r in group["run_ids"] if r != group["base_run_id"])
+    stats = leaderboard(TASK)["seed_groups"][0]
+
+    out = register_model(other)  # a non-original member: the group's original is registered
+    assert out["run_id"] == group["base_run_id"] and out["val_score"] == stats["mean"]
+    assert out["val_n"] == len(group["run_ids"]) and out["val_std"] == stats["std"]
+    card = (budget / "registry" / TASK / "v1" / "model_card.md").read_text(encoding="utf-8")
+    assert (
+        f"**{stats['mean']:.4f} ± {stats['std']:.4f}** (mean of {len(group['run_ids'])} seeds); "
+        "single-run score" in card
+    )
+    row = next(r for r in leaderboard(TASK)["top"] if r["run_id"] == base)
+    assert row["val_headline"].startswith(stats["mean_std"]) and "single run" in row["val_headline"]

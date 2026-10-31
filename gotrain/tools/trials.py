@@ -471,6 +471,7 @@ def leaderboard(task: str, top_k: int = 10) -> dict:
         row["stopped_by_budget"] = e.get("stopped_by_budget", False)
         if gid := group_of(e["run_id"], groups):
             row |= {"seed_group": gid, "mean_std": mean_std_text(stats[gid])}
+            row["val_headline"] = f"{row['mean_std']} (single run {e['val_score']:.4f})"
         top.append(row)
     out = {"task": task, "n_runs": len(entries), "metric_name": None, "top": top}
     if groups:

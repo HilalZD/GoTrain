@@ -13,9 +13,14 @@ from gotrain.engine import get_engine
 from gotrain.tools._common import (
     error,
     find_entry,
+    group_of,
+    group_stats,
+    load_entries,
+    load_seed_groups,
     now_utc,
     run_key,
     storage,
+    task_from_run_id,
     tool,
     unknown_run,
 )
@@ -97,12 +102,34 @@ def members_section(mv: ModelVersion) -> str:
     return "\n".join(lines) + "\n\n"
 
 
+def val_headline(mv: ModelVersion) -> str:
+    """'**0.9700 ± 0.0030 (mean of 3 seeds)**, single run 0.9720', or just the score."""
+    if mv.val_n and mv.val_n >= 2 and mv.single_val_score is not None:
+        std = f" ± {mv.val_std:.4f}" if mv.val_std is not None else ""
+        return (
+            f"**{mv.val_score:.4f}{std}** (mean of {mv.val_n} seeds); "
+            f"single-run score {mv.single_val_score:.4f}"
+        )
+    return f"**{mv.val_score:.4f}**"
+
+
+def seed_group_choice(run_id: str) -> tuple[str, dict] | None:
+    """(the group's ORIGINAL run id, its stats) if `run_id` is in a seed group of 2+ runs."""
+    task = task_from_run_id(run_id)
+    groups = load_seed_groups(task) if task else {}
+    gid = group_of(run_id, groups)
+    if gid is None:
+        return None
+    stats = group_stats(groups[gid]["run_ids"], load_entries(task))
+    return (groups[gid]["base_run_id"], stats) if stats["n"] >= 2 else None
+
+
 def model_card(mv: ModelVersion, entry: dict, chain: list[str], notes: str) -> str:
     return f"""# {mv.task} {mv.version}
 
 - Run: `{mv.run_id}`{" (best member)" if len(mv.members) > 1 else ""}
 - Model: {describe_model(mv)}
-- Validation {entry["metric_name"]}: **{mv.val_score:.4f}**
+- Validation {entry["metric_name"]}: {val_headline(mv)}
 {extra_metric_lines(entry)}- Training time: {entry["minutes"]:.1f} min, {entry["epochs"]} epochs
 - Lineage (newest first): {" <- ".join(f"`{r}`" for r in chain)}
 - Git commit: `{mv.git_commit}`
@@ -187,8 +214,20 @@ def register_model(
     if any(e["task"] != task for e in entries):
         return error("all members must be runs of the same task", "Check the run ids.")
 
+    group_info: dict = {}
     if len(members) == 1 and not tta:
         val_score = entries[0]["val_score"]
+        if (choice := seed_group_choice(members[0])) and (base := find_entry(choice[0])):
+            # register the group's ORIGINAL run (as the harness does); headline = group mean
+            _, stats = choice
+            if base["status"] == "ok":
+                entries, members = [base], [base["run_id"]]
+                val_score = stats["mean"]
+                group_info = {
+                    "val_std": stats["std"],
+                    "val_n": stats["n"],
+                    "single_val_score": base["val_score"],
+                }
     else:
         measured = find_candidate_result(task, members, tta)
         if measured is None:
@@ -226,6 +265,7 @@ def register_model(
         artifact_path=storage().uri(dst),
         members=[e["run_id"] for e in entries],
         tta=tta,
+        **group_info,
     )
     storage().write_text(f"{dst}/model_version.json", mv.model_dump_json(indent=2))
     card = model_card(mv, primary, lineage(primary["run_id"]), notes)
@@ -237,6 +277,7 @@ def register_model(
         "members": mv.members,
         "tta": mv.tta,
         "val_score": mv.val_score,
+        **group_info,
         "files_copied": n_files,
         "model_card": f"{dst}/model_card.md",
     }

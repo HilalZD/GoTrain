@@ -217,6 +217,10 @@ class ModelVersion(BaseModel):
         default_factory=list, description="Run ids averaged at inference; [run_id] if single."
     )
     tta: bool = Field(default=False, description="Test-time augmentation (8 flip/rot90 views).")
+    # when val_score is a seed-group mean: its spread, seed count and the run's own score
+    val_std: float | None = None
+    val_n: int | None = None
+    single_val_score: float | None = None
 
     @model_validator(mode="after")
     def _members_include_run(self) -> "ModelVersion":

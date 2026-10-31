@@ -10,7 +10,8 @@ def test_export_copies_small_files_and_writes_summary(budget, tmp_path):  # noqa
     home = budget
     register_model(one_run())
     final_test(TASK, "v1")
-    (home / "queue_status.json").write_text("[]", encoding="utf-8")
+    for plan in ("overnight_a", "overnight_b"):
+        (home / f"queue_status_{plan}.json").write_text("[]", encoding="utf-8")
     (home / "label_efficiency").mkdir()
     (home / "label_efficiency" / f"{TASK}.json").write_text("{}", encoding="utf-8")
     out = tmp_path / "results"
@@ -25,7 +26,8 @@ def test_export_copies_small_files_and_writes_summary(budget, tmp_path):  # noqa
     assert f"registry/{TASK}/leaderboard.jsonl" in copied
     assert f"registry/{TASK}/v1/model_card.md" in copied
     assert f"registry/{TASK}/TEST_LOCK.json" in copied
-    assert "queue_status.json" in copied and f"label_efficiency/{TASK}.json" in copied
+    assert {"queue_status_overnight_a.json", "queue_status_overnight_b.json"} <= copied
+    assert f"label_efficiency/{TASK}.json" in copied
     assert not any("checkpoint" in p or p.endswith((".pt", ".pth", ".ckpt")) for p in copied)
 
     summary = (out / "summary.md").read_text(encoding="utf-8")

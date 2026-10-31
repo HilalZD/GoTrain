@@ -6,8 +6,12 @@ keys; the one exception is `local_path`, which gives the engine a real directory
 to write a run into.
 """
 
+import contextlib
+import os
 import shutil
+import time
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
 
 from gotrain.config import Settings, get_settings
@@ -64,6 +68,26 @@ def check_key(key: str) -> str:
     return key
 
 
+@contextlib.contextmanager
+def _append_lock(path: Path, timeout_s: float = 30.0) -> Iterator[None]:
+    """A lock file next to `path` (O_EXCL), so writers on one disk never interleave entries."""
+    lock = path.with_name(path.name + ".lock")
+    deadline = time.monotonic() + timeout_s
+    while True:
+        try:
+            os.close(os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+            break
+        except (FileExistsError, PermissionError):  # PermissionError: Windows, lock being deleted
+            if time.monotonic() > deadline:  # a crashed writer left it behind
+                lock.unlink(missing_ok=True)
+                continue
+            time.sleep(0.005)
+    try:
+        yield
+    finally:
+        lock.unlink(missing_ok=True)
+
+
 class LocalBackend(Storage):
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
@@ -111,8 +135,10 @@ class LocalBackend(Storage):
     def append_text(self, key: str, text: str) -> None:
         path = self._path(key)
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a", encoding="utf-8") as f:
-            f.write(text)
+        with _append_lock(path):
+            with path.open("ab") as f:
+                f.write(text.encode("utf-8"))
+                f.flush()
 
     def read_bytes(self, key: str) -> bytes:
         return self._path(key).read_bytes()

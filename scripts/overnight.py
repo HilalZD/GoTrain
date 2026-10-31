@@ -7,7 +7,7 @@
       - {task: m-eurosat, budget_min: 5, home: ~/gotrain_home, label_fracs: [0.05, 0.25]}
 
 Never finalises: the test set is not touched here. Per entry: a log file in <home>/logs/queue/
-and a row in <home>/queue_status.json. A crash is logged and the queue goes on. If
+and a row in <home>/queue_status_<plan>.json. A crash is logged and the queue goes on. If
 ~/GOTRAIN_STOP exists (override: GOTRAIN_STOP_FILE) the queue stops after the current entry.
 A label_fracs entry skips the tune if a model is already registered in its home.
 memory "empty" gives the entry an isolated lessons file (memory ablation). label_fracs
@@ -76,8 +76,8 @@ def entry_env(entry: dict) -> Iterator[Path]:
                 os.environ[key] = value
 
 
-def write_status(home: Path, index: int, row: dict) -> None:
-    path = home / "queue_status.json"
+def write_status(home: Path, plan: str, index: int, row: dict) -> None:
+    path = home / f"queue_status_{plan}.json"
     rows = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
     while len(rows) <= index:
         rows.append({})
@@ -128,7 +128,7 @@ def _run_minutes(task: str, run_id: str) -> float:
         return 2.0
 
 
-def run_entry(entry: dict, index: int) -> dict:
+def run_entry(entry: dict, index: int, plan: str = "plan") -> dict:
     """One queue entry: tune, then optional label curve. Never raises."""
     task = entry["task"]
     row = {
@@ -140,8 +140,8 @@ def run_entry(entry: dict, index: int) -> dict:
         "registered_version": None,
     }
     with entry_env(entry) as home:
-        write_status(home, index, row)
-        log_path = home / "logs" / "queue" / f"{index:02d}-{task}.log"
+        write_status(home, plan, index, row)
+        log_path = home / "logs" / "queue" / plan / f"{index:02d}-{task}.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with (
             log_path.open("a", encoding="utf-8") as log,
@@ -171,21 +171,21 @@ def run_entry(entry: dict, index: int) -> dict:
                 row["status"] = f"crashed: {type(exc).__name__}: {exc}"
                 if isinstance(exc, KeyboardInterrupt):
                     row["end"] = utc_now()
-                    write_status(home, index, row)
+                    write_status(home, plan, index, row)
                     raise
         row["end"] = utc_now()
         row["log"] = str(log_path)
-        write_status(home, index, row)
+        write_status(home, plan, index, row)
     return row
 
 
-def run_queue(queue: list[dict]) -> list[dict]:
+def run_queue(queue: list[dict], plan: str = "plan") -> list[dict]:
     rows = []
     for index, entry in enumerate(queue):
         if stop_file().exists():
             print(f"{stop_file()} exists: stopping before entry {index} ({entry['task']})")
             break
-        rows.append(run_entry(entry, index))
+        rows.append(run_entry(entry, index, plan))
         print(f"[{index}] {entry['task']}: {rows[-1]['status']}", flush=True)
     return rows
 
@@ -193,7 +193,8 @@ def run_queue(queue: list[dict]) -> list[dict]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("plan", type=Path)
-    run_queue(load_plan(parser.parse_args(argv).plan))
+    plan = parser.parse_args(argv).plan
+    run_queue(load_plan(plan), plan.stem)
     return 0
 
 

@@ -460,3 +460,8 @@ budget, test records, model cards/versions, journals, queue_status, label-effici
 lessons into `results/<home name>/` (never checkpoints) and writes `results/summary.md`: a table
 per task (val mean ± std, test + CI, GPU minutes, Bedrock tokens from session_end usage) with
 published references and the human baseline from `targets.json`.
+
+## Shared-home queues, seed-group registration
+
+- Queue files are per plan: `queue_status_<plan>.json`, `logs/queue/<plan>/`; export reads all `queue_status_*.json`. Appends (lessons, journals, leaderboards) take a lock file next to the target, so two writers on one disk never interleave.
+- `register_model(run_id)` of a seed-group member registers the group ORIGINAL run (as the harness does). `ModelVersion` gains `val_std`, `val_n`, `single_val_score`; `val_score` is then the group mean, the model card headline is mean ± std with the single-run score second, and leaderboard rows carry `val_headline`. Ensembles/TTA keep their measured score.

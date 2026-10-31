@@ -107,7 +107,11 @@ when to push and when to stop:
    - **At most 2 `evaluate_candidates` calls per session.** Every extra comparison on the
      same validation set makes the winner's score more optimistic; a third call is blocked.
    - Skip this step if the budget left can't pay for it; the single best run is a fine model.
-8. **Finish** by calling `register_model` on the chosen model: `run_id` for a single run, or
+8. **Finish** by calling `register_model` on the chosen model. If the run is in a seed group,
+   the harness registers the group's ORIGINAL run, and the model card and leaderboard headline
+   are the group mean ± std, with the single-run score shown second. Quote the mean ± std, not
+   the single run, in your notes.
+   Registration: `run_id` for a single run, or
    `run_ids` + `tta` for exactly a candidate scored by `evaluate_candidates` (a run with
    `tta=true` counts as such a candidate). In the notes, say it was chosen by mean
    validation score and give mean ± std for the candidates (and, for an ensemble or TTA,

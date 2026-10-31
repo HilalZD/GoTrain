@@ -28,7 +28,7 @@ Returns:
 | key | type | meaning |
 |---|---|---|
 | `task`, `split` | str | echoed |
-| `metric_name` | str | `"accuracy"` (classification) or `"miou"` (segmentation) |
+| `metric_name` | str | `"accuracy"` (classification), `"miou"` (segmentation), `"f1"` (multilabel) |
 | `score` | float | the metric, **computed from `per_sample`** |
 | `n_samples` | int | images evaluated |
 | `per_sample` | dict | see below; used for bootstrap confidence intervals |
@@ -42,6 +42,13 @@ Returns:
 - segmentation: `{"intersection": [[...K]] * N, "union": [[...K]] * N}`, **pixel counts** per
   image and class (K = `n_classes`, class order as in the DatasetCard). `score` is the mean
   over classes with total union > 0 of `sum(intersection[:, k]) / sum(union[:, k])`.
+  For m-chesapeake this is the official **7-class** mIoU, "no data" (class 0) included, so it is
+  comparable with GEO-Bench results; selection always uses it (request #9). The 6-class
+  `miou_excl_nodata` is an extra field in `metrics.json` and `diagnose()` output, shown in
+  model cards, never used for selection.
+- multilabel (request #8; none of our 4 tasks): `{"tp": [...], "fp": [...], "fn": [...]}`, one
+  count per image, labels decided at probability 0.5; `score` = micro-F1 =
+  `2·ΣTP / (2·ΣTP + ΣFP + ΣFN)`, `metric_name` `"f1"`.
 
 Example (fake engine, m-eurosat, 2-model ensemble with TTA; `correct` truncated):
 
@@ -68,8 +75,12 @@ predict(task: str, checkpoint_path: Path | list[Path], images: np.ndarray, tta: 
 ```
 
 - `images`: float array **N x C x H x W**, raw values in the dataset's units, with `C` and band
-  order exactly as `describe_dataset(task).bands`. **The engine normalises** (train-split band
-  stats). Wrong channel count: `ValueError` naming the expected shape.
+  order exactly as `describe_dataset(task).bands`. **The engine normalises, and each
+  checkpoint uses its own normalisation** (request #7): `imagenet` / `none` checkpoints apply
+  the train-split z-score; `ssl4eo_s2` checkpoints divide by 10000, reorder bands by name to
+  TorchGeo's 13-band order and zero-fill missing bands (how those weights were pretrained).
+  The caller sees no difference: raw images in, probabilities out; an ensemble may mix both
+  kinds. `evaluate` does the same. Wrong channel count: `ValueError` naming the expected shape.
 - Ensembles and `tta` behave as in `evaluate`.
 - Predictions for an image must not depend on the rest of the batch.
 
@@ -79,6 +90,8 @@ Returns numpy arrays:
 |---|---|---|
 | `probabilities` | float32, N x K, rows sum to 1 | float32, N x K x H x W, sums to 1 over K |
 | `labels` | int64, N (argmax) | int64, N x H x W (argmax) |
+
+Multilabel: sigmoid `probabilities` N x K and 0/1 `labels` N x K (threshold 0.5).
 | `n_checkpoints`, `tta` | as in `evaluate` | as in `evaluate` |
 
 Example: `predict("m-eurosat", [ckpt_a, ckpt_b], images[2 x 13 x 64 x 64])` returns
@@ -87,8 +100,10 @@ Example: `predict("m-eurosat", [ckpt_a, ckpt_b], images[2 x 13 x 64 x 64])` retu
 ## Unchanged from v1
 
 - `train(config, budget_minutes, run_dir) -> TrainResult`: scored on **val**; finish within the
-  budget (LR schedule tied to it); return status `"timeout"` with 0 epochs if not even one
-  epoch fits; status `"error"` with the valid list for invalid backbone/weights combos.
+  budget (LR schedule tied to it). A run stopped by its budget with at least one validated
+  epoch and a checkpoint is status `"ok"` and writes `"stopped_by_budget": true` to
+  `run_dir/metrics.json` (request #2; the tools also read `stop_reason == "budget"`); return
+  status `"timeout"` with 0 epochs if not even one epoch fits; status `"error"` with the valid list for invalid backbone/weights combos.
 - `describe_dataset(task) -> DatasetCard`: train/val only; `sensor` must say Sentinel-2 for
   m-eurosat and m-brick-kiln (any spelling of "sentinel-2").
 - `diagnose(task, run_dir) -> dict`: `per_class`, `confusion_matrix` (rows = true class,

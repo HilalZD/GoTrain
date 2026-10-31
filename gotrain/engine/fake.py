@@ -137,8 +137,8 @@ HAND_CARDS: dict[str, DatasetCard] = {  # used only when no real card is cached
         mask_unique_values=[0, 1],
         notes="FAKE card. Heavy class imbalance: panels are ~3% of pixels.",
     ),
-    "m-chesapeake-landcover": DatasetCard(
-        task="m-chesapeake-landcover",
+    "m-chesapeake": DatasetCard(
+        task="m-chesapeake",
         task_type="segmentation",
         sensor="naip",
         bands=["red", "green", "blue", "nir"],
@@ -177,7 +177,7 @@ BASE_SCORE = {  # val score of a well-tuned imagenet run
     "m-eurosat": 0.90,
     "m-brick-kiln": 0.94,
     "m-pv4ger-seg": 0.82,
-    "m-chesapeake-landcover": 0.60,
+    "m-chesapeake": 0.60,
 }
 WEIGHTS_BONUS = {"none": -0.08, "imagenet": 0.0}
 AUGMENT_BONUS = {"rot90": 0.012, "flip": 0.008, "color_jitter": -0.004}
@@ -188,6 +188,8 @@ OVERFIT_RATE = 0.0015
 SUBSET_PENALTY = 0.03  # a 0.25 subsample caps the reachable score ~2 points lower
 SEED_NOISE_STD = 0.0025  # seed-to-seed spread of the final score: roughly +-0.3 points
 EPOCH_NOISE_STD = 0.002  # epoch-to-epoch wobble of the val curve
+NODATA_CLASS = "no data"  # m-chesapeake's class 0 (blank tiles)
+NODATA_GAIN = 0.02  # fake miou_excl_nodata: a little above the official 7-class mIoU
 
 
 def config_seed(config: TrainConfig, include_seed: bool = True) -> int:
@@ -508,6 +510,9 @@ class FakeEngine:
         history = make_history(target_score(config, card, rng), epochs, per_epoch, rng, overfit)
         best = max(h.val_score for h in history)
         checkpoint = self._write_checkpoint(run_dir, config, best, history)
+        self._write_metrics(
+            run_dir, card, best, epochs, stopped_by_budget=epochs < config.max_epochs
+        )
         return TrainResult(
             run_id=run_id,
             task=config.task,
@@ -607,6 +612,23 @@ class FakeEngine:
             if unknown:
                 return f"bands {unknown} not in {config.task}; available: {card.bands}"
         return check_config(card, config)
+
+    @staticmethod
+    def _write_metrics(
+        run_dir: Path, card: DatasetCard, val_score: float, epochs: int, stopped_by_budget: bool
+    ) -> None:
+        """metrics.json as the real engine writes it (the fields the tools read)."""
+        metrics = {
+            "status": "ok",
+            "metric_name": metric_for(card),
+            "val_score": val_score,
+            "epochs_run": epochs,
+            "stop_reason": "budget" if stopped_by_budget else "max_epochs",
+            "stopped_by_budget": stopped_by_budget,
+        }
+        if NODATA_CLASS in card.class_names:  # extra number only; the score keeps every class
+            metrics["miou_excl_nodata"] = round(_clip(val_score + NODATA_GAIN), 4)
+        (run_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
 
     @staticmethod
     def _write_checkpoint(

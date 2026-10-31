@@ -83,7 +83,9 @@ when to push and when to stop:
    image was attached, base the observation on the per-class scores and confusions.
 4. **Refine.** Apply the fix the diagnosis suggests, one change per hypothesis: another
    `run_halving` round of variants, `run_trials` for one or two configs, or `promote` to give
-   an underfitting leader more time.
+   an underfitting leader more time. Runs with `stopped_by_budget: true` ran out of time
+   before `max_epochs`: their validation curve may still be rising, so they are the natural
+   candidates for `promote`.
 5. **Repeat** while budget remains and scores keep improving. **Stop exploring** when the best
    validation score has improved by less than 0.5 points (0.005) across 3 rounds, or the
    budget is nearly gone.
@@ -124,7 +126,7 @@ when to push and when to stop:
   - `weights="imagenet"` or `"none"`: resnet18, resnet34, resnet50, convnext_tiny
   - `weights="ssl4eo_s2"`: resnet18 and resnet50 only, and only on Sentinel-2 tasks
     (e.g. m-eurosat, m-brick-kiln). Never on aerial RGB / NAIP tasks (e.g. m-pv4ger-seg,
-    m-chesapeake-landcover).
+    m-chesapeake).
 
   `inspect_dataset` lists the options valid for the current task. Segmentation uses a
   U-Net/FPN decoder on top of these backbones.
@@ -132,7 +134,7 @@ when to push and when to stop:
   (`inspect_dataset` shows them as `training_rules`):
   - classification: `ce`, `focal` or `bce`.
   - segmentation: `ce`, `dice_ce`, `focal`, `bce` or `dice_bce`; `bce` and `dice_bce`
-    only for 2-class masks (e.g. m-pv4ger-seg, not m-chesapeake-landcover).
+    only for 2-class masks (e.g. m-pv4ger-seg, not m-chesapeake).
   - Segmentation `img_size` must be a multiple of 32 (e.g. 256 or 320).
 - **Inputs are already normalised per band** using train-set statistics. You do not need to
   compensate for raw value ranges.

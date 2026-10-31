@@ -40,7 +40,7 @@ def one_run(**overrides) -> str:
 
 def test_lessons_roundtrip_and_tag_matching(home):
     write_lesson(TASK, "SSL4EO beats imagenet by ~3 points.", ["Sentinel-2", "classification"])
-    write_lesson("m-chesapeake-landcover", "## not a header\nDice helps rare classes.", ["naip"])
+    write_lesson("m-chesapeake", "## not a header\nDice helps rare classes.", ["naip"])
     found = read_lessons(["sentinel-2"])
     assert found["n_found"] == 1
     assert found["lessons"][0]["tags"] == ["classification", "sentinel-2"]

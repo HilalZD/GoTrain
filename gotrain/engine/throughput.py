@@ -1,6 +1,7 @@
 """A deliberately simple model of training time per epoch.
 
     seconds per image = height * width / pixels_per_second + seconds_per_image (overhead)
+    (segmentation tasks use their own pixels_per_second: a U-Net decoder costs extra)
     minutes per epoch = (train_samples * train_subset_frac + val_samples) * minutes per image
 
 Bands, backbone and batch size are ignored. Every epoch also runs the full validation set,
@@ -12,7 +13,11 @@ constant can't fit both (that would be ~388 Mpx/min at 64 px vs ~903 at 224 px):
 images are dominated by a fixed per-image cost. The two terms below fit both exactly:
     10.0 - 1.9 = 3,000 x (224^2 - 64^2) px / pixels_per_second  -> 1,024 Mpx/min
     1.9 = 3,000 x (64^2 / pixels_per_second + overhead)          -> 0.393 ms per image
-Classification only so far; segmentation (U-Net) timings are pending (Serena's M3).
+Segmentation is measured on m-pv4ger-seg (U-Net resnet34, batch 16, 3,000 train + 403 val
+images at 320 px): ~34 s per epoch. The classification rate predicts only ~21.8 s, so
+segmentation gets its own pixel rate, keeping the same per-image overhead:
+    34 = 3,403 x (320^2 / seg_pixels_per_second + 0.393 ms)        -> ~640 Mpx/min
+One measurement, one task: m-chesapeake (256 px, 4,000 images) is extrapolated (~26 s).
 **Update REAL_T4 here when new measurements arrive.**
 
 The fake engine has its own, slower FAKE_TIMING (gotrain/engine/fake.py), and hints use
@@ -36,16 +41,21 @@ class TimingModel:
     pixels_per_minute: float
     seconds_per_image: float = 0.0
     counts_val: bool = True  # whether each epoch's validation pass is part of the time
+    seg_pixels_per_minute: float | None = None  # None: same rate as classification
 
-    def minutes_per_image(self, height: int, width: int) -> float:
-        return height * width / self.pixels_per_minute + self.seconds_per_image / 60
+    def minutes_per_image(self, height: int, width: int, segmentation: bool = False) -> float:
+        rate = self.pixels_per_minute
+        if segmentation and self.seg_pixels_per_minute:
+            rate = self.seg_pixels_per_minute
+        return height * width / rate + self.seconds_per_image / 60
 
 
 REAL_T4 = TimingModel(
-    name="real T4 (calibrated on m-eurosat, resnet50, fp16, batch 64)",
+    name="real T4 (calibrated on m-eurosat resnet50 and m-pv4ger-seg U-Net resnet34, fp16)",
     pixels_per_minute=1_024e6,
     seconds_per_image=3.93e-4,
     counts_val=True,
+    seg_pixels_per_minute=640.2e6,
 )
 
 
@@ -65,9 +75,10 @@ def estimate_minutes_per_epoch(
     frac: float = 1.0,
     val_samples: int = 0,
     timing: TimingModel = REAL_T4,
+    segmentation: bool = False,
 ) -> float:
     images = train_samples * frac + (val_samples if timing.counts_val else 0)
-    return images * timing.minutes_per_image(height, width)
+    return images * timing.minutes_per_image(height, width, segmentation)
 
 
 def card_minutes_per_epoch(
@@ -77,8 +88,9 @@ def card_minutes_per_epoch(
     timing = timing or active_timing()
     height, width = (side, side) if side else card.image_size
     split = card.split_sizes
+    seg = card.task_type == "segmentation"
     return estimate_minutes_per_epoch(
-        split["train"], height, width, frac, split.get("val", 0), timing
+        split["train"], height, width, frac, split.get("val", 0), timing, seg
     )
 
 
@@ -93,7 +105,7 @@ def subset_for_epochs(
     in `minutes`; None if even the validation passes alone don't fit."""
     timing = timing or active_timing()
     height, width = (side, side) if side else card.image_size
-    per_image = timing.minutes_per_image(height, width)
+    per_image = timing.minutes_per_image(height, width, card.task_type == "segmentation")
     val_minutes = card.split_sizes.get("val", 0) * per_image if timing.counts_val else 0.0
     train_minutes = minutes / epochs - val_minutes
     if train_minutes <= 0:

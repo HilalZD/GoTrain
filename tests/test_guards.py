@@ -145,7 +145,7 @@ def test_screening_hint_fires_for_pv4ger():
 
 
 @pytest.mark.parametrize(
-    "task, fires", [("m-eurosat", False), ("m-brick-kiln", True), ("m-chesapeake-landcover", True)]
+    "task, fires", [("m-eurosat", False), ("m-brick-kiln", True), ("m-chesapeake", True)]
 )
 def test_screening_hint_by_task(task, fires):
     assert (screening_advice(CARDS[task]) is not None) == fires

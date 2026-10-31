@@ -18,7 +18,7 @@ from gotrain.engine.rules import (
 )
 from gotrain.tools import init_task_budget, inspect_dataset, promote, run_trials
 
-SEG, MULTI_SEG = "m-pv4ger-seg", "m-chesapeake-landcover"  # 2 classes, 7 classes
+SEG, MULTI_SEG = "m-pv4ger-seg", "m-chesapeake"  # 2 classes, 7 classes
 
 
 def cfg(task: str, **overrides) -> TrainConfig:

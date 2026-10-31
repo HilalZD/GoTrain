@@ -125,3 +125,36 @@ Each entry: what, why, and the smallest change that would do it.
   could alternatively accept an alias, but one name is simpler to audit.
 - **Decision (Serena, 2026-10-31):** use `m-chesapeake`, the real folder name; Hilal switches the
   fake engine card and docs.
+
+## Hilal's replies (2026-10-31, after merging PR #2)
+
+- **#2 Accepted.** Budget-stopped runs with a valid checkpoint are `"ok"`; 0-epoch runs stay
+  `"timeout"`. The tools record `stopped_by_budget` per trial and show it in trial tables, the
+  leaderboard and model cards; `promote` accepts such runs (even at `max_epochs` epochs, since
+  a cut-short last epoch is validated). **Small ask:** `metrics.json` has `stop_reason` but no
+  `"stopped_by_budget"` key yet; please add `"stopped_by_budget": stop_reason == "budget"`.
+  Until then the tools read `stop_reason == "budget"`, so nothing breaks.
+- **#5 Closed.** Names containing `_dev_` are dev homes (done with the PR #1 follow-ups).
+- **#6 Accepted.** `RealEngine.evaluate` forwards `tta` and checkpoint lists. The ensemble/TTA
+  comparison tool comes next; `final_test` always uses whatever won on VALIDATION.
+- **#7 Accepted.** contract-v2.md now says each checkpoint uses its own normalisation.
+- **#8 Accepted.** Multilabel `per_sample` (per-image tp/fp/fn, micro-F1) is in contract-v2.md.
+- **#9 Confirmed.** The official m-chesapeake score is the 7-class mIoU; `miou_excl_nodata` is
+  stored with the trial and shown in model cards, never used for selection.
+- **#10 Done.** `m-chesapeake` everywhere on our side (fake engine, targets, prompts, docs).
+
+## 11. `describe_dataset`: majority-class baseline and flat-tile fraction (Hilal → Serena)
+
+- **What:** two automatic fields in the recon card that `describe_dataset` returns:
+  - `majority_class_baseline`: the val score of always predicting the most common train
+    class (accuracy for classification; mIoU of an all-majority mask for segmentation).
+  - `flat_tile_fraction`: per class, the fraction of train images that are (nearly) flat,
+    e.g. every band's spatial std below a small threshold you pick.
+- **Why:** data shortcuts should be visible in the card the agent reads, without a human
+  telling it. Example: many of m-brick-kiln's "not brick kiln" tiles are flat, so a model can
+  score well by spotting flat tiles; and a score is only meaningful next to the majority
+  baseline.
+- **Change needed (Serena's files):** compute both in the recon step and pass them through to
+  `to_dataset_card`. `DatasetCard` ignores unknown keys today, so once the names are agreed
+  Hilal adds the two optional fields to `contracts.py` and shows them in `inspect_dataset`'s
+  summary. Facts only: no recipe or advice in the card.

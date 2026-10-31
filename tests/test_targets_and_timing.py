@@ -44,7 +44,7 @@ def test_hints_follow_the_active_engine(monkeypatch, tmp_path):
     monkeypatch.setenv("GOTRAIN_ENGINE", "real")
     monkeypatch.setenv("GOTRAIN_HOME", str(tmp_path / "gotrain_home"))
     assert active_timing() is REAL_T4
-    assert card_minutes_per_epoch(card) * 60 == pytest.approx(21.8, abs=0.5)
+    assert card_minutes_per_epoch(card) * 60 == pytest.approx(34.0, abs=0.5)
     assert screening_advice(card) is None  # 3 real epochs fit in a 2-min screen
 
 
@@ -69,7 +69,7 @@ def test_targets_load_and_validate():
     assert all(r.split == "test" for t in targets.tasks.values() for r in t.references)
     assert eurosat.human_baseline.value == 0.986 and eurosat.human_baseline.split == "val"
     assert targets.tasks["m-pv4ger-seg"].references[0].value == 0.9523
-    assert targets.tasks["m-chesapeake-landcover"].metric == "miou"
+    assert targets.tasks["m-chesapeake"].metric == "miou"
 
 
 def test_target_metrics_match_the_tasks():

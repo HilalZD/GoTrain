@@ -59,12 +59,25 @@ def data_summary(task: str) -> str:
     return "\n".join(f"- {k}: {card[k]}" for k in keys)
 
 
+def extra_metric_lines(entry: dict) -> str:
+    """Extra engine numbers, labelled as such: shown to readers, never used to pick a model."""
+    lines = ""
+    if entry.get("miou_excl_nodata") is not None:
+        lines += (
+            f"- Extra (not the official score, not used for selection): mIoU excluding the "
+            f"no-data class {entry['miou_excl_nodata']:.4f}\n"
+        )
+    if entry.get("stopped_by_budget"):
+        lines += "- Stopped by its time budget before max_epochs (the curve may still rise)\n"
+    return lines
+
+
 def model_card(mv: ModelVersion, entry: dict, chain: list[str], notes: str) -> str:
     return f"""# {mv.task} {mv.version}
 
 - Run: `{mv.run_id}`
 - Validation {entry["metric_name"]}: **{mv.val_score:.4f}**
-- Training time: {entry["minutes"]:.1f} min, {entry["epochs"]} epochs
+{extra_metric_lines(entry)}- Training time: {entry["minutes"]:.1f} min, {entry["epochs"]} epochs
 - Lineage (newest first): {" <- ".join(f"`{r}`" for r in chain)}
 - Git commit: `{mv.git_commit}`
 - Registered: {mv.created_at.isoformat()}

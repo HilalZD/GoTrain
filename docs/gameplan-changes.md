@@ -19,9 +19,10 @@ Four GEO-Bench tasks:
 | `m-eurosat` | classification | Sentinel-2 |
 | `m-brick-kiln` | classification | Sentinel-2 |
 | `m-pv4ger-seg` | segmentation | aerial RGB |
-| `m-chesapeake-landcover` | segmentation | NAIP RGBN |
+| `m-chesapeake` | segmentation | NAIP RGBN |
 
-We always use GEO-Bench's full name, `m-chesapeake-landcover`, never a short form.
+We use GEO-Bench's real task name, `m-chesapeake` (the dataset's folder name). It was
+`m-chesapeake-landcover` until request #10; see the incident log.
 
 ## Pretrained weights
 
@@ -194,7 +195,7 @@ epochs, wasting 9 min.
   `describe_dataset`'s notes. `inspect_dataset` returns a `screening_hint` when 3 full-data
   epochs don't fit in a 2-minute screening trial, with the `train_subset_frac` (or
   `short_minutes`) that would fit. With the fake numbers: m-eurosat 0.1 min/epoch (no hint),
-  m-brick-kiln 0.75, m-chesapeake-landcover 2.4, m-pv4ger-seg 3.75 (hint: subsample <= 0.15).
+  m-brick-kiln 0.75, m-chesapeake 2.4, m-pv4ger-seg 3.75 (hint: subsample <= 0.15).
   **For the real engine the constant is a placeholder** until measured on the T4; observed
   `minutes_per_epoch` from trials beats the estimate.
 
@@ -309,6 +310,18 @@ Full spec for the real engine: `docs/contract-v2.md`. Backward compatible with v
   - Fake-engine tests stay per-home and never touch the ledger.
 - **Impact:** none. No real test evaluation had been run.
 
+### 2026-10-31: wrong task name `m-chesapeake-landcover` (request #10)
+
+- **Found:** by Serena, running the real engine: `describe_dataset("m-chesapeake-landcover")`
+  failed with FileNotFoundError.
+- **Cause:** the name came from the fake engine's hand-written card (and the docs copied it);
+  GEO-Bench's task and folder are called `m-chesapeake`.
+- **Fix:** renamed to `m-chesapeake` everywhere on our side (fake engine, targets, prompts,
+  docs, tests). A test fails if the old name reappears in the package. The fake engine now
+  loads Serena's real m-chesapeake card (classes start with "no data").
+- **Impact:** none on results. Any dev home with runs under the old name keeps them under that
+  name; they are not mixed with m-chesapeake runs.
+
 ## Calibrated timing (real T4)
 
 - **Measurement** (SageMaker T4; m-eurosat, resnet50, batch 64, fp16; 2,000 train + 1,000 val
@@ -317,8 +330,12 @@ Full spec for the real engine: `docs/contract-v2.md`. Backward compatible with v
   image = pixels / 1,024 Mpx/min + 0.393 ms overhead, for train *and* val images. One
   pixels-per-minute constant can't fit both points (~388 vs ~903 Mpx/min): small images are
   dominated by a fixed per-image cost. The two terms reproduce both measurements exactly.
-- **Pending:** segmentation (U-Net) timings from Serena's M3; until then segmentation
-  estimates use the classification calibration and are probably optimistic.
+- **Segmentation** (Serena's measurement: m-pv4ger-seg, U-Net resnet34, 320 px, batch 16,
+  3,000 train + 403 val images): ~34 s per epoch. The classification rate predicts only
+  ~21.8 s (the U-Net decoder costs extra), so segmentation tasks get their own pixel rate,
+  ~640 Mpx/min, with the same 0.393 ms per-image overhead. It reproduces 34 s; the
+  classification fit is unchanged. m-chesapeake (256 px, 4,000 images) is extrapolated:
+  ~26 s per epoch. No real-T4 screening hint fires on any of our four tasks.
 - **Fake engine keeps its own, slower `FAKE_TIMING`** (20,000 64x64 images per minute, train
   only). At real speed every dev trial would finish all its epochs in seconds, so budgets,
   halving, fail-fast and the epoch warnings would never be exercised. Hints and fail-fast
@@ -327,15 +344,16 @@ Full spec for the real engine: `docs/contract-v2.md`. Backward compatible with v
 ## Goal-aware agent: published reference scores
 
 - `gotrain/knowledge/targets.json` holds, per task, published GEO-Bench reference **TEST**
-  scores (metric, value as a fraction, model, source), plus a `human_baseline` for m-eurosat
-  (Serena's hand-trained model, val accuracy 0.986):
+  scores (metric, value as a fraction, model, source), plus a `human_baseline` (Serena's
+  hand-trained models, VALIDATION scores) for m-eurosat (accuracy 0.986) and m-pv4ger-seg
+  (mIoU 0.959):
 
   | Task | Metric | Best reference | Model |
   |---|---|---|---|
   | m-eurosat | accuracy | 0.986 (also 0.9816, MoCo ResNet50) | TerraFM (fine-tuned) |
   | m-brick-kiln | accuracy | 0.9879 | Prithvi-EO-2.0-600M |
   | m-pv4ger-seg | mIoU | 0.9523 | Prithvi-EO-2.0-600M |
-  | m-chesapeake-landcover | mIoU | 0.7081 | DINO ResNet50 |
+  | m-chesapeake | mIoU | 0.7081 | DINO ResNet50 |
 
 - **Scores only.** The schema forbids any other key, and a test fails if the file contains a
   hyperparameter-like key (lr, backbone, batch_size, ...): humans never pick hyperparameters.
@@ -343,4 +361,33 @@ Full spec for the real engine: `docs/contract-v2.md`. Backward compatible with v
   are test numbers while the agent sees validation scores). The tune prompt uses them:
   far below (> ~3 points) explore more; in between exploit; within ~1 point or above stop
   exploring and spend the rest on seed checks (and ensembles/TTA once those tools exist).
-- **To do:** some sources are recorded as "citation to be added".
+- **Sources:** m-brick-kiln, m-pv4ger-seg, m-chesapeake and the MoCo ResNet50 m-eurosat
+  number come from the Prithvi-EO-2.0 paper appendix, Tables A1-A4 (arXiv 2412.02732);
+  m-eurosat 0.986 from the TerraFM paper (arXiv 2506.06281).
+- Serena's other measured facts (which configs her hand baselines used, etc.) are **not** put
+  in prompts, memory or targets: that would hand the agent a human-tuned recipe.
+
+## Serena's contract requests after PR #2
+
+PR #2 (real engine, contract v2, recon for m-brick-kiln and m-chesapeake) merged into main
+after the contract checks and the full local suite passed; the GPU suite re-runs on SageMaker.
+
+- **#2 budget-stopped runs are "ok".** A run stopped by its time budget with at least one
+  validated epoch and a checkpoint has status "ok" and `stopped_by_budget: true` (read from
+  the engine's `metrics.json`; `stop_reason == "budget"` also counts). Trial tables, the
+  leaderboard (with a note: the curve may still be rising) and model cards show it, and
+  `promote` accepts such runs even when they show `max_epochs` epochs (the real engine
+  validates a cut-short last epoch). 0-epoch runs stay "timeout".
+- **#5** closed: `_dev_` homes are dev homes (done with the PR #1 follow-ups).
+- **#6** `RealEngine.evaluate` forwards `tta` and checkpoint lists (contract v2). The
+  ensemble/TTA comparison tool is the next chunk; `final_test` always uses whatever won on
+  VALIDATION.
+- **#7** normalisation is per checkpoint and owned by the engine; contract-v2.md reworded.
+- **#8** multilabel `per_sample` = per-image tp/fp/fn, score = micro-F1 (in contract-v2.md).
+- **#9** the official m-chesapeake score is the 7-class mIoU (GEO-Bench comparable);
+  `miou_excl_nodata` is recorded with the trial and shown in model cards, never used for
+  selection.
+- **#10** the task is `m-chesapeake` (see the incident log).
+- **New request #11** (to Serena): `describe_dataset` should compute
+  `majority_class_baseline` and a per-class flat-tile fraction, so data shortcuts appear in
+  the card the agent reads.

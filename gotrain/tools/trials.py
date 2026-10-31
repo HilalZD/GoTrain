@@ -4,7 +4,9 @@ Every trial is scored on VALIDATION. Trials run one at a time and each one is
 charged to the task's GPU budget (registry/<task>/budget.json).
 """
 
+import json
 import time
+from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
@@ -145,6 +147,30 @@ def _train(config: TrainConfig, run_id: str, budget_minutes: float) -> TrainResu
         )
 
 
+# Extra numbers from the engine's metrics.json shown to people (model cards), never ranked on.
+EXTRA_METRICS = ("miou_excl_nodata",)
+
+
+def engine_metrics(run_dir: Path) -> dict:
+    """The engine's metrics.json for a run ({} if it wrote none or it is unreadable)."""
+    try:
+        return json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def stopped_by_budget(result: TrainResult, config: TrainConfig, metrics: dict) -> bool:
+    """An "ok" run that ended because its time ran out, not at max_epochs: its val curve may
+    still be rising, so promoting it can pay off. A 0-epoch run stays a "timeout" instead."""
+    if result.status != "ok":
+        return False
+    if "stopped_by_budget" in metrics:
+        return bool(metrics["stopped_by_budget"])
+    if "stop_reason" in metrics:  # the real engine before it wrote stopped_by_budget
+        return metrics["stop_reason"] == "budget"
+    return len(result.history) < config.max_epochs
+
+
 def _execute_trial(
     config: TrainConfig, budget_minutes: float, parent: str | None, **extra: Any
 ) -> dict:
@@ -161,9 +187,10 @@ def _execute_trial(
     storage().write_text(f"{key}/result.json", result.model_dump_json(indent=2))
     _charge(config.task, result.minutes_used)
 
+    run_dir = storage().local_path(key)
+    metrics = engine_metrics(run_dir)
     checkpoint = None
     if result.checkpoint_path is not None:
-        run_dir = storage().local_path(key)
         checkpoint = result.checkpoint_path.relative_to(run_dir).as_posix()
     entry = {
         "run_id": run_id,
@@ -178,11 +205,13 @@ def _execute_trial(
             round(result.minutes_used / len(result.history), 3) if result.history else None
         ),
         "max_epochs": config.max_epochs,
+        "stopped_by_budget": stopped_by_budget(result, config, metrics),
         "config": summarize_config(config),
         "reason": short_reason(config.reason),
         "parent": parent,
         "checkpoint": checkpoint,
         "error": result.error,
+        **{k: metrics[k] for k in EXTRA_METRICS if metrics.get(k) is not None},
         "created_at": now_utc().isoformat(),
         **extra,
     }
@@ -192,7 +221,7 @@ def _execute_trial(
 
 def _row(entry: dict, *extra_keys: str) -> dict:
     """The compact view of one trial that tools return (and the audit log records)."""
-    keys = ("run_id", *extra_keys, "status", "val_score", "minutes", "reason")
+    keys = ("run_id", *extra_keys, "status", "val_score", "minutes", "stopped_by_budget", "reason")
     row = {k: entry.get(k) for k in keys}
     if entry.get("error"):
         row["error"] = entry["error"]
@@ -332,7 +361,8 @@ def promote(run_id: str, extra_budget_minutes: float, force: bool = False) -> di
     2 seeds) of the best run, unless force=true.
 
     Args:
-        run_id: A successful run that stopped before max_epochs (from run_trials/leaderboard).
+        run_id: A successful run that stopped before max_epochs or was stopped_by_budget
+            (from run_trials/leaderboard).
         extra_budget_minutes: Minutes added to the parent's per-trial budget.
         force: Promote even if no seed check would be affordable afterwards. The final pick
             would then rest on a single-seed score; say so in the register_model notes.
@@ -345,7 +375,7 @@ def promote(run_id: str, extra_budget_minutes: float, force: bool = False) -> di
             f"run {run_id} has status {parent['status']!r}; only successful runs can be promoted",
             "Promote one of the top 'ok' runs from leaderboard().",
         )
-    if parent["epochs"] >= parent["max_epochs"]:
+    if parent["epochs"] >= parent["max_epochs"] and not parent.get("stopped_by_budget"):
         return error(
             f"run {run_id} already finished all {parent['max_epochs']} epochs; "
             "more time would reproduce the same result",
@@ -381,7 +411,10 @@ def promote(run_id: str, extra_budget_minutes: float, force: bool = False) -> di
     return {
         "task": task,
         "parent": {k: parent[k] for k in ("run_id", "val_score", "minutes", "epochs")},
-        "child": {k: child[k] for k in ("run_id", "status", "val_score", "minutes", "epochs")},
+        "child": {
+            k: child[k]
+            for k in ("run_id", "status", "val_score", "minutes", "epochs", "stopped_by_budget")
+        },
         "delta_val_score": delta,
         "forced": force,
         **seed_check_status(task),
@@ -409,6 +442,12 @@ def _seed_reserve_problem(task: str, budget: float) -> dict | None:
     )
 
 
+STOPPED_BY_BUDGET_NOTE = (
+    "stopped_by_budget=true: the run ran out of time before max_epochs, so its validation "
+    "curve may still be rising. Such runs can be promoted for more time."
+)
+
+
 @tool
 def leaderboard(task: str, top_k: int = 10) -> dict:
     """The task's runs ranked by val score: config summary, score, minutes, status, parent.
@@ -429,6 +468,7 @@ def leaderboard(task: str, top_k: int = 10) -> dict:
     for i, e in enumerate(entries[:top_k], start=1):
         row = {"rank": i}
         row |= {k: e[k] for k in ("run_id", "status", "val_score", "minutes", "config", "parent")}
+        row["stopped_by_budget"] = e.get("stopped_by_budget", False)
         if gid := group_of(e["run_id"], groups):
             row |= {"seed_group": gid, "mean_std": mean_std_text(stats[gid])}
         top.append(row)
@@ -442,6 +482,8 @@ def leaderboard(task: str, top_k: int = 10) -> dict:
             ),
             key=lambda g: -(g["mean"] or 0.0),
         )
+    if any(row["stopped_by_budget"] for row in top):
+        out["stopped_by_budget_note"] = STOPPED_BY_BUDGET_NOTE
     if entries:
         out["metric_name"] = entries[0]["metric_name"]
     else:

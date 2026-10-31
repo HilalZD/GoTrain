@@ -19,7 +19,7 @@ def test_run_trials_saves_run_folder_and_returns_table(budget):
     out = run_trials(TASK, [make_config()], 2.0)
     assert "error" not in out
     (row,) = out["trials"]
-    assert set(row) == {"run_id", "status", "val_score", "minutes", "reason"}
+    assert set(row) == {"run_id", "status", "val_score", "minutes", "stopped_by_budget", "reason"}
     assert re.fullmatch(r"m-eurosat-\d{8}-\d{6}-[0-9a-f]{4}", row["run_id"])
 
     run_dir = budget / "runs" / TASK / row["run_id"]

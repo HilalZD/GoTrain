@@ -226,3 +226,43 @@ them"). In Strands a text-only reply ends the agent loop, so the session finishe
   registered from an earlier session, nothing is duplicated (`auto_register_failed`).
 - **Prompt.** Never end a turn with a text-only reply while the plan and budget remain;
   write observations in the same response as the next tool call.
+
+## Final feature list (v2)
+
+The target feature set for the final demo. Status as of this commit: **done** = built and
+tested on the fake engine; **partial** = groundwork exists; **planned** = not started.
+
+| Feature | Status |
+|---|---|
+| Ensemble of top checkpoints + flip/rot90 test-time augmentation, chosen on validation | partial: engine contract v2 (`evaluate`/`predict` take a list of checkpoints and `tta`); selection tool planned |
+| Agent knows the published GEO-Bench best score per task | planned |
+| Forecast-driven halving (learning-curve extrapolation) | planned (successive halving done) |
+| Enforced visual self-diagnosis | done (error grid + ObservationGate) |
+| Seed-verified decisions | done (`confirm_seeds`, mean ± std, noise rule) |
+| Budget plan + fail-fast + guaranteed registration | done (budget plan prompt, seed-check reserve, 0-epoch fail-fast, continuations + safety net) |
+| Cross-task memory with same-task ablation | partial: lessons memory done; ablation runs planned |
+| Data integrity scan (train<->val near-duplicates) | planned |
+| Test vault | done (single entry point `final_test`, TEST_LOCK, rule test) |
+| Confidence intervals on test scores | partial: `per_sample` in contract v2 enables bootstrap CIs |
+| One-command replay | planned |
+| Incident log | planned (incidents recorded by hand in this file so far) |
+| Model packages: agent-readable card, calibrated confidence, cost receipt | partial: model card done |
+| MCP server (train, status, find_model, predict) | planned (`predict` in contract v2) |
+| Local <-> S3 storage | partial: local done, S3 stub (PutObject denied for now) |
+| 4 tasks + zero-touch 5th | partial: 4 tasks on the fake engine |
+| Label-efficiency curve | planned (`train_subset_frac` exists) |
+
+## Engine contract v2
+
+Full spec for the real engine: `docs/contract-v2.md`. Backward compatible with v1.
+
+- `evaluate(task, checkpoint_path | [paths], split, tta=False)` adds `n_samples` and
+  `per_sample` (classification: 0/1 correct per image; segmentation: per-image, per-class
+  intersection and union pixel counts). A list of checkpoints is an ensemble that averages
+  probabilities.
+- `predict(task, checkpoint_path | [paths], images N x C x H x W, tta=False)` returns
+  `probabilities` and `labels`.
+- The fake engine implements both. Its reported score is computed from `per_sample`, ensembles
+  gain up to +0.6 points and TTA +0.4 points (deterministic), and `predict` genuinely averages
+  each fake model's probabilities (its models are flip/rotation invariant, so `tta` has no
+  effect there).

@@ -369,6 +369,87 @@ def curve_verdict(history: list[EpochRecord]) -> str:
     return "fine"
 
 
+ENSEMBLE_GAIN = 0.006  # approached as more models are averaged: gain x (1 - 1/k)
+TTA_GAIN = 0.004
+TEST_GAP_MAX = 0.02  # each model's test score is up to this much below its val score
+
+
+def load_checkpoints(task: str, checkpoint_path: Path | list[Path]) -> list[dict]:
+    paths = checkpoint_path if isinstance(checkpoint_path, list) else [checkpoint_path]
+    if not paths:
+        raise ValueError("checkpoint_path is an empty list; pass at least one checkpoint")
+    ckpts = [json.loads(Path(p).read_text(encoding="utf-8")) for p in paths]
+    for ckpt in ckpts:
+        if ckpt["task"] != task:
+            raise ValueError(f"checkpoint is for {ckpt['task']!r}, not {task!r}")
+    return ckpts
+
+
+def expected_score(ckpts: list[dict], split: str, tta: bool) -> float:
+    """Mean of the models' scores, plus an ensemble gain and a TTA gain."""
+    scores = [
+        c["val_score"]
+        - (random.Random(c["seed"]).uniform(0.0, TEST_GAP_MAX) if split == "test" else 0.0)
+        for c in ckpts
+    ]
+    gain = ENSEMBLE_GAIN * (1 - 1 / len(ckpts)) + (TTA_GAIN if tta else 0.0)
+    return _clip(sum(scores) / len(scores) + gain)
+
+
+def evaluation_seed(ckpts: list[dict], split: str) -> int:
+    payload = json.dumps([sorted(c["seed"] for c in ckpts), split])
+    return int(hashlib.sha256(payload.encode()).hexdigest()[:8], 16)
+
+
+def correct_flags(score: float, n: int, rng: np.random.Generator) -> list[int]:
+    """n 0/1 flags with round(score * n) ones, at shuffled positions."""
+    n_correct = round(score * n)
+    flags = np.array([1] * n_correct + [0] * (n - n_correct))
+    return rng.permutation(flags).tolist()
+
+
+def segmentation_counts(card: DatasetCard, score: float, n: int, rng: np.random.Generator) -> dict:
+    """Per-image, per-class intersection and union pixel counts with mIoU near `score`.
+
+    Rare classes get a lower IoU. With equal true and predicted areas t and IoU r,
+    intersection = 2tr / (1 + r) and union = 2t - intersection.
+    """
+    shares = np.array([card.class_distribution[c] for c in card.class_names], dtype=float)
+    shares /= shares.sum()
+    class_iou = score - 0.2 * (1 - shares / shares.max()) ** 2
+    class_iou = np.clip(class_iou - class_iou.mean() + score, 0.05, 0.995)
+    pixels = card.image_size[0] * card.image_size[1]
+    area = rng.dirichlet(shares * 50 + 1e-3, size=n) * pixels  # true pixels per class
+    iou = np.clip(class_iou + rng.normal(0, 0.05, size=(n, len(shares))), 0.01, 1.0)
+    intersection = np.rint(2 * area * iou / (1 + iou))
+    union = np.rint(2 * area) - intersection
+    return {"intersection": intersection.astype(int).tolist(), "union": union.astype(int).tolist()}
+
+
+def miou(counts: dict) -> float:
+    """Mean over classes (present in the split) of total intersection / total union."""
+    inter = np.array(counts["intersection"]).sum(axis=0)
+    union = np.array(counts["union"]).sum(axis=0)
+    present = union > 0
+    return float((inter[present] / union[present]).mean())
+
+
+def fake_model_probs(card: DatasetCard, seed: int, images: np.ndarray) -> np.ndarray:
+    """One fake model's class probabilities: N x K, or N x K x H x W for segmentation."""
+    rng = np.random.default_rng(seed % 2**32)
+    weights = rng.normal(size=(card.n_classes, images.shape[1]))
+    bias = rng.normal(size=card.n_classes)
+    scale = np.abs(images).mean(axis=(1, 2, 3), keepdims=True) + 1e-6  # per image
+    x = images / scale
+    if card.task_type == "segmentation":
+        logits = np.einsum("kc,nchw->nkhw", weights, x) + bias[None, :, None, None]
+    else:
+        logits = x.mean(axis=(2, 3)) @ weights.T + bias
+    logits -= logits.max(axis=1, keepdims=True)
+    exp = np.exp(logits)
+    return exp / exp.sum(axis=1, keepdims=True)
+
+
 class FakeEngine:
     def __init__(self, sleep_s: float = 1.0) -> None:
         self.sleep_s = sleep_s
@@ -416,16 +497,55 @@ class FakeEngine:
             checkpoint_path=checkpoint,
         )
 
-    def evaluate(self, task: str, checkpoint_path: Path, split: str) -> dict:
+    def evaluate(
+        self, task: str, checkpoint_path: Path | list[Path], split: str, tta: bool = False
+    ) -> dict:
+        """Contract v2. Per-sample results are generated around the expected score, and the
+        reported score is computed from them, so the two always agree."""
         if split not in ("val", "test"):
             raise ValueError(f"split must be 'val' or 'test', got {split!r}")
-        ckpt = json.loads(Path(checkpoint_path).read_text(encoding="utf-8"))
-        if ckpt["task"] != task:
-            raise ValueError(f"checkpoint is for {ckpt['task']!r}, not {task!r}")
-        score = ckpt["val_score"]
-        if split != "val":
-            score = round(score - random.Random(ckpt["seed"]).uniform(0.0, 0.02), 4)
-        return {"task": task, "split": split, "metric_name": ckpt["metric_name"], "score": score}
+        ckpts = load_checkpoints(task, checkpoint_path)
+        card = CARDS[task]
+        n = card.split_sizes["val"]  # GEO-Bench test sets for our tasks match val in size
+        expected = expected_score(ckpts, split, tta)
+        rng = np.random.default_rng(evaluation_seed(ckpts, split))  # same draws with/without tta
+        if card.task_type == "segmentation":
+            per_sample = segmentation_counts(card, expected, n, rng)
+            score = miou(per_sample)
+        else:
+            per_sample = {"correct": correct_flags(expected, n, rng)}
+            score = sum(per_sample["correct"]) / n
+        return {
+            "task": task,
+            "split": split,
+            "metric_name": ckpts[0]["metric_name"],
+            "score": round(score, 4),
+            "n_samples": n,
+            "per_sample": per_sample,
+            "n_checkpoints": len(ckpts),
+            "tta": tta,
+        }
+
+    def predict(
+        self, task: str, checkpoint_path: Path | list[Path], images: np.ndarray, tta: bool = False
+    ) -> dict:
+        """Contract v2. Each fake model is a seeded linear map (per pixel for segmentation,
+        on band means for classification), so flips and rotations don't change its output:
+        `tta` is accepted and has no effect here."""
+        card = CARDS[task]
+        ckpts = load_checkpoints(task, checkpoint_path)
+        images = np.asarray(images, dtype=np.float32)
+        if images.ndim != 4 or images.shape[1] != len(card.bands):
+            raise ValueError(
+                f"images must be N x {len(card.bands)} x H x W for {task}, got {images.shape}"
+            )
+        probs = np.mean([fake_model_probs(card, c["seed"], images) for c in ckpts], axis=0)
+        return {
+            "probabilities": probs.astype(np.float32),
+            "labels": probs.argmax(axis=1),
+            "n_checkpoints": len(ckpts),
+            "tta": tta,
+        }
 
     def describe_dataset(self, task: str) -> DatasetCard:
         if task not in CARDS:

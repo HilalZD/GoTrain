@@ -11,8 +11,11 @@ from gotrain.tools.search import INCONCLUSIVE_WARNING, screening_summary
 TASK = "m-eurosat"  # fake engine: 0.1 min/epoch at img 64 + 0.2 min setup
 
 
-def ok(score: float) -> dict:
-    return {"status": "ok", "val_score": score}
+def ok(score: float, epochs: int = 10, run_id: str = "r") -> dict:
+    return {"run_id": run_id, "status": "ok", "val_score": score, "epochs": epochs}
+
+
+FAILED = {"run_id": "bad", "status": "error", "val_score": None, "epochs": 0}
 
 
 # ---------------------------------------------------------------- screening
@@ -20,13 +23,40 @@ def ok(score: float) -> dict:
 
 def test_inconclusive_screening_warns():
     out = screening_summary([ok(0.680), ok(0.683), ok(0.6815)])
-    assert out == {"screening_spread": 0.003, "warning": INCONCLUSIVE_WARNING}
+    assert out == {"screening_spread": 0.003, "warnings": [INCONCLUSIVE_WARNING]}
 
 
 def test_conclusive_screening_has_no_warning():
-    out = screening_summary([ok(0.667), ok(0.683), {"status": "error", "val_score": None}])
-    assert out == {"screening_spread": 0.016}
-    assert screening_summary([ok(0.7)]) == {"screening_spread": None}
+    out = screening_summary([ok(0.667), ok(0.683), FAILED])
+    assert out == {"screening_spread": 0.016, "warnings": []}
+    assert screening_summary([ok(0.7)]) == {"screening_spread": None, "warnings": []}
+
+
+def test_few_epochs_warning_names_the_short_runs():
+    rung1 = [ok(0.667, 1, "a"), ok(0.683, 2, "b"), ok(0.70, 3, "c"), FAILED]
+    (warning,) = screening_summary(rung1)["warnings"]  # spread 0.033: only the epoch warning
+    assert warning.startswith(
+        "rung 1 trials finished only 1 epochs; screening is unreliable. "
+        "Use train_subset_frac 0.2–0.3 or a longer short_minutes"
+    )
+    assert "a (1), b (2)" in warning and "c (" not in warning and "bad" not in warning
+
+
+def test_both_screening_warnings_can_fire():
+    out = screening_summary([ok(0.680, 1), ok(0.682, 1)])
+    assert len(out["warnings"]) == 2 and out["warnings"][0] == INCONCLUSIVE_WARNING
+
+
+def test_halving_warns_on_one_epoch_screen_and_not_with_subsample(home):
+    init_task_budget("m-brick-kiln", 100)  # 15k train samples: 0.75 min per full epoch
+    full = run_halving("m-brick-kiln", [make_config(seed=s) for s in range(3)], 1.5, 4.0, 1)
+    rung1 = [t["run_id"] for t in full["trials"] if t["rung"] == 1]
+    epoch_warning = next(w for w in full["warnings"] if "finished only 1 epochs" in w)
+    assert all(run_id in epoch_warning for run_id in rung1)
+
+    subsampled = [make_config(seed=s, train_subset_frac=0.25) for s in range(3)]
+    out = run_halving("m-brick-kiln", subsampled, 1.5, 4.0, 1)  # 6 epochs each
+    assert not any("epochs" in w for w in out["warnings"])
 
 
 def test_halving_reports_spread_and_warning(home):
@@ -36,7 +66,7 @@ def test_halving_reports_spread_and_warning(home):
     out = run_halving(TASK, configs, 1.0, 3.0, 1)
     rung1 = [t["val_score"] for t in out["trials"] if t["rung"] == 1]
     assert out["screening_spread"] == pytest.approx(max(rung1) - min(rung1), abs=1e-4)
-    assert ("warning" in out) == (out["screening_spread"] < 0.005)
+    assert (INCONCLUSIVE_WARNING in out["warnings"]) == (out["screening_spread"] < 0.005)
     assert {"seed_check_cost_min", "can_afford_seed_check"} <= out.keys()
 
 

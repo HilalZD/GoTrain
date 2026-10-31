@@ -35,6 +35,7 @@ from gotrain.tools import (
     run_trials,
     write_lesson,
 )
+from gotrain.tools.diagnose import diagnose_for_model
 from gotrain.tools.registry import list_versions, load_version
 from gotrain.tools.trials import budget_status
 
@@ -119,10 +120,14 @@ def config_reference() -> str:
 
 
 CONFIG_TOOLS = (run_trials, run_halving)  # tools whose `configs` argument needs the field list
+# The only tool allowed to show the model an image: its adapter adds the error grid.
+IMAGE_ADAPTERS = {diagnose: diagnose_for_model}
 
 
 def to_strands_tool(fn: Any) -> Any:
     """Expose a plain GoTrain tool to Strands; config-taking tools also get the field list."""
+    if fn in IMAGE_ADAPTERS:
+        return strands_tool(IMAGE_ADAPTERS[fn])
     if fn not in CONFIG_TOOLS:
         return strands_tool(fn)
     summary = inspect.cleandoc(fn.__doc__).split("\n\nArgs:")[0]

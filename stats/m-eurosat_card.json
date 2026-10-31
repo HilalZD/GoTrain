@@ -19,16 +19,16 @@
   ],
   "n_classes": 10,
   "class_names": [
-    "Industrial Buildings",
-    "Residential Buildings",
     "Annual Crop",
-    "Permanent Crop",
-    "River",
-    "Sea and Lake",
+    "Forest",
     "Herbaceous Vegetation",
     "Highway",
+    "Industrial Buildings",
     "Pasture",
-    "Forest"
+    "Permanent Crop",
+    "Residential Buildings",
+    "River",
+    "Sea and Lake"
   ],
   "image_size": [
     64,
@@ -39,27 +39,11 @@
     "val": 1000
   },
   "class_distribution": {
-    "Industrial Buildings": {
-      "count": 200,
-      "pct": 10.0
-    },
-    "Residential Buildings": {
-      "count": 200,
-      "pct": 10.0
-    },
     "Annual Crop": {
       "count": 200,
       "pct": 10.0
     },
-    "Permanent Crop": {
-      "count": 200,
-      "pct": 10.0
-    },
-    "River": {
-      "count": 200,
-      "pct": 10.0
-    },
-    "Sea and Lake": {
+    "Forest": {
       "count": 200,
       "pct": 10.0
     },
@@ -71,11 +55,27 @@
       "count": 200,
       "pct": 10.0
     },
+    "Industrial Buildings": {
+      "count": 200,
+      "pct": 10.0
+    },
     "Pasture": {
       "count": 200,
       "pct": 10.0
     },
-    "Forest": {
+    "Permanent Crop": {
+      "count": 200,
+      "pct": 10.0
+    },
+    "Residential Buildings": {
+      "count": 200,
+      "pct": 10.0
+    },
+    "River": {
+      "count": 200,
+      "pct": 10.0
+    },
+    "Sea and Lake": {
       "count": 200,
       "pct": 10.0
     }
@@ -112,7 +112,8 @@
   ],
   "notes": [
     "Band names corrected: the published data mislabels channels (https://github.com/ServiceNow/geo-bench#known-issues). True order: B01, B02, B03, B04, B05, B06, B07, B08, B09, B10, B11, B12, B8A.",
-    "band value scales differ by ~185x (e.g. 8-bit channels next to reflectance): per-band normalisation is mandatory."
+    "Class names corrected: geobench's class_names list does not match the label integers (see data_notes.md gotcha 14). Label order: 0 Annual Crop, 1 Forest, 2 Herbaceous Vegetation, 3 Highway, 4 Industrial Buildings, 5 Pasture, 6 Permanent Crop, 7 Residential Buildings, 8 River, 9 Sea and Lake.",
+    "band value scales differ by ~185x (p99: B10 29 vs B8A 5352): per-band normalisation is mandatory."
   ],
   "dtype": [
     "int16"
@@ -211,14 +212,16 @@
     "B05": 20,
     "B06": 20,
     "B07": 20,
-    "B08": 20,
-    "B09": 20,
+    "B08": 10,
+    "B09": 60,
     "B10": 60,
-    "B11": 60,
+    "B11": 20,
     "B12": 20,
     "B8A": 20
   },
   "band_names_corrected": true,
+  "class_names_corrected": true,
+  "excluded_pixels": 0,
   "example_sample": {
     "name": "id_12886",
     "shape_hwc": [

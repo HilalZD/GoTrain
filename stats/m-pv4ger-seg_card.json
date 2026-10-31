@@ -84,6 +84,8 @@
     "Blue": 0.1
   },
   "band_names_corrected": false,
+  "class_names_corrected": false,
+  "excluded_pixels": 0,
   "example_sample": {
     "name": "7.001829544,52.21933747",
     "shape_hwc": [

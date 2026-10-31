@@ -6,12 +6,14 @@ For each task this prints a readable summary, writes
     stats/<task>.json        train-split per-band mean/std (read by train.py)
     stats/<task>_card.json   the full DatasetCard dict (future inspect_dataset tool)
     docs/figures/<task>_samples.png   8 training samples
+    docs/figures/<task>_per_label.png 6 training tiles per label (single-label classification only)
 
 Rules this file enforces:
   * Only the TRAIN and VALID splits are ever opened. `_open_split` refuses "test".
   * No task-specific logic: task type, bands, classes and labels come from geobench's
-    own task metadata. The one exception is BAND_ORDER_FIXES, which is upstream errata
-    (data, not logic) for two published datasets with mislabelled channels.
+    own task metadata. The only exceptions are two upstream errata tables (data, not logic):
+    BAND_ORDER_FIXES for two published datasets with mislabelled channels, and CLASS_NAME_FIXES
+    for m-eurosat, whose class_names list is out of order (evidence cited at the table).
 """
 
 from __future__ import annotations
@@ -38,6 +40,23 @@ BAND_ORDER_FIXES = {
     "m-brick-kiln": ["B01", "B02", "B03", "B04", "B05", "B07", "B8A", "B08", "B11", "B12", "TCI_R", "TCI_G", "TCI_B"],
 }
 ERRATA_URL = "https://github.com/ServiceNow/geo-bench#known-issues"
+
+# Upstream errata (found by us, 2026-10-31): m-eurosat's label integers follow the original alphabetical
+# EuroSAT order, but geobench's class_names list is in a different order. Evidence, train split only:
+# docs/figures/m-eurosat_per_label.png (6 tiles per label index) and mean NDVI per label (label 9 = -0.25,
+# i.e. water; label 1 = +0.71, i.e. forest). Same strings as geobench, reordered. See data_notes.md gotcha 14.
+CLASS_NAME_FIXES: dict[str, list[str]] = {
+    "m-eurosat": ["Annual Crop", "Forest", "Herbaceous Vegetation", "Highway", "Industrial Buildings",
+                  "Pasture", "Permanent Crop", "Residential Buildings", "River", "Sea and Lake"],
+}
+
+# Standard Sentinel-2 MSI native resolutions, used instead of the stored metadata when band names are
+# corrected (the stored resolutions belong to the mislabelled names).
+S2_NATIVE_RES_M = {
+    **dict.fromkeys(["B02", "B03", "B04", "B08"], 10),
+    **dict.fromkeys(["B05", "B06", "B07", "B8A", "B11", "B12"], 20),
+    **dict.fromkeys(["B01", "B09", "B10"], 60),
+}
 
 SENSOR_NAMES = {
     "Sentinel2": "Sentinel-2", "Sentinel1": "Sentinel-1", "Landsat8": "Landsat-8",
@@ -95,6 +114,13 @@ def _channel_names(task_name: str, raw_names: list[str]) -> tuple[list[str], boo
     return raw_names, False
 
 
+def _corrected_class_names(task_name: str, raw_names: list[str]) -> tuple[list[str], bool]:
+    fix = CLASS_NAME_FIXES.get(task_name)
+    if fix is not None and len(fix) == len(raw_names):
+        return list(fix), True
+    return raw_names, False
+
+
 def _label_value(label):
     """Band -> its pixel array; anything else (int, vector) unchanged."""
     return label.data if hasattr(label, "data") else label
@@ -126,6 +152,7 @@ class RunningBandStats:
         self.total_pixels = 0
         self.nodata_pixels = 0
         self.nonfinite_values = 0
+        self.excluded_pixels = 0  # nodata pixels + pixels with any NaN/inf value
         self.constant_in_image = np.zeros(n_bands, dtype=int)
         self.images = 0
 
@@ -139,6 +166,7 @@ class RunningBandStats:
         nodata = np.all(x == 0, axis=1)
         self.nodata_pixels += int(nodata.sum())
         x[nodata] = np.nan
+        self.excluded_pixels += int((nodata | nonfinite.any(axis=1)).sum())
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
             nb = np.sum(np.isfinite(x), axis=0).astype(float)
@@ -203,7 +231,8 @@ def inspect_task(task_name: str, data_dir: str | None = None, max_stats_samples:
     task = load_task(task_name, data_dir)
     task_type = _task_type(task)
     n_classes = int(task.label_type.n_classes)
-    class_names = _class_names(task, n_classes)
+    raw_class_names = _class_names(task, n_classes)
+    class_names, names_fixed = _corrected_class_names(task_name, raw_class_names)
     ds_train, ds_val = _open_split(task, "train"), _open_split(task, "valid")
     n_train, n_val = len(ds_train), len(ds_val)
     rng = np.random.default_rng(seed)
@@ -217,6 +246,10 @@ def inspect_task(task_name: str, data_dir: str | None = None, max_stats_samples:
     if fixed:
         notes.append(f"Band names corrected: the published data mislabels channels ({ERRATA_URL}). "
                      f"True order: {', '.join(bands)}.")
+    if names_fixed:
+        notes.append("Class names corrected: geobench's class_names list does not match the label integers "
+                     "(see data_notes.md gotcha 14). Label order: "
+                     + ", ".join(f"{i} {n}" for i, n in enumerate(class_names)) + ".")
     if resampled:
         notes.append("Bands are stored at different native sizes; pack_to_3d(resample=True) upsamples them "
                      "(cubic) to the largest size. train.py must do the same.")
@@ -234,7 +267,7 @@ def inspect_task(task_name: str, data_dir: str | None = None, max_stats_samples:
     native_res = {}
     for i, bi in enumerate(s0.band_info_list):
         if i < len(bands):
-            native_res[bands[i]] = bi.spatial_resolution
+            native_res[bands[i]] = S2_NATIVE_RES_M.get(bands[i]) if fixed else bi.spatial_resolution
 
     # --- labels over the FULL train split (label-only reads are cheap) ---
     counts: Counter = Counter()
@@ -326,10 +359,13 @@ def inspect_task(task_name: str, data_dir: str | None = None, max_stats_samples:
         notes.append(f"nodata ({NODATA_RULE}): {100 * nodata_fraction:.3f}% of pixels; excluded from stats.")
     if rs.nonfinite_values:
         notes.append(f"{rs.nonfinite_values} NaN/inf values found; excluded from stats. train.py must handle them.")
-    finite_p99 = p99[np.isfinite(p99) & (p99 > 0)]
-    if finite_p99.size >= 2 and finite_p99.max() / finite_p99.min() > 20:
-        notes.append(f"band value scales differ by ~{finite_p99.max() / finite_p99.min():.0f}x "
-                     "(e.g. 8-bit channels next to reflectance): per-band normalisation is mandatory.")
+    usable = [i for i in range(len(bands)) if np.isfinite(p99[i]) and p99[i] > 0]
+    if len(usable) >= 2:
+        lo = min(usable, key=lambda i: p99[i])
+        hi = max(usable, key=lambda i: p99[i])
+        if p99[hi] / p99[lo] > 20:
+            notes.append(f"band value scales differ by ~{p99[hi] / p99[lo]:.0f}x (p99: {bands[lo]} {p99[lo]:g} vs "
+                         f"{bands[hi]} {p99[hi]:g}): per-band normalisation is mandatory.")
     if n_train < 1000:
         notes.append(f"small train set ({n_train}): prefer pretrained backbones and strong augmentation.")
 
@@ -337,7 +373,8 @@ def inspect_task(task_name: str, data_dir: str | None = None, max_stats_samples:
     stats_dir = Path(stats_dir)
     stats_dir.mkdir(parents=True, exist_ok=True)
     stats = {"task": task_name, "split": "train", "n_samples": int(n_stats), "seed": seed,
-             "bands": bands, "mean": [round(float(v), 6) for v in mean], "std": [round(float(v), 6) for v in std]}
+             "bands": bands, "mean": [round(float(v), 6) for v in mean], "std": [round(float(v), 6) for v in std],
+             "excluded_pixels": int(rs.excluded_pixels)}
     (stats_dir / f"{task_name}.json").write_text(json.dumps(stats, indent=2))
 
     card = {
@@ -364,6 +401,8 @@ def inspect_task(task_name: str, data_dir: str | None = None, max_stats_samples:
         "spatial_resolution_m": float(task.spatial_resolution) if task.spatial_resolution else None,
         "native_band_resolution_m": native_res,
         "band_names_corrected": fixed,
+        "class_names_corrected": names_fixed,
+        "excluded_pixels": int(rs.excluded_pixels),
         "example_sample": {"name": s0.sample_name, "shape_hwc": list(arr0.shape), "dtype": str(arr0.dtype),
                            "bands": sample_bands},
     }
@@ -458,7 +497,7 @@ def save_sample_grid(task_name: str, data_dir: str | None = None, n: int = 8, se
     task = load_task(task_name, data_dir)
     task_type = _task_type(task)
     n_classes = int(task.label_type.n_classes)
-    class_names = _class_names(task, n_classes)
+    class_names, _ = _corrected_class_names(task_name, _class_names(task, n_classes))
     ds = _open_split(task, "train")
     idx = np.random.default_rng(seed).choice(len(ds), size=min(n, len(ds)), replace=False)
 
@@ -530,6 +569,86 @@ def save_sample_grid(task_name: str, data_dir: str | None = None, n: int = 8, se
     return out
 
 
+NIR_PATTERNS = [r"^nir$", r"^b0?8$", r"^0?8 - nir"]
+
+
+def _find_band(bands: list[str], patterns: list[str]) -> int | None:
+    for pat in patterns:
+        for i, b in enumerate(bands):
+            if re.search(pat, b.strip().lower()):
+                return i
+    return None
+
+
+def _mean_ndvi(arr: np.ndarray, red: int, nir: int) -> float:
+    r, n = arr[..., red].astype(np.float64), arr[..., nir].astype(np.float64)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ndvi = (n - r) / (n + r)
+    return float(np.nanmean(np.where(np.isfinite(ndvi), ndvi, np.nan)))
+
+
+def save_label_grid(task_name: str, data_dir: str | None = None, per_label: int = 6, seed: int = 0,
+                    max_ndvi_per_label: int = 200, fig_dir: str | Path = "docs/figures") -> Path | None:
+    """Single-label classification only: one row per label index with `per_label` TRAIN tiles, titled with
+    the class name and mean NDVI (if red and NIR bands exist). This is the evidence for CLASS_NAME_FIXES."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    task = load_task(task_name, data_dir)
+    if _task_type(task) != "classification":
+        return None
+    n_classes = int(task.label_type.n_classes)
+    raw_names = _class_names(task, n_classes)
+    names, names_fixed = _corrected_class_names(task_name, raw_names)
+    ds = _open_split(task, "train")
+    by_label: dict[int, list[int]] = {c: [] for c in range(n_classes)}
+    for i in range(len(ds)):
+        by_label[int(_labels_only(ds, i))].append(i)
+
+    _, raw_bands, _ = _sample_array(ds[0])
+    bands, _ = _channel_names(task_name, raw_bands)
+    rgb, _ = pick_rgb(bands)
+    red, nir = _find_band(bands, RGB_PATTERNS["red"]), _find_band(bands, NIR_PATTERNS)
+    rng = np.random.default_rng(seed)
+
+    fig, axes = plt.subplots(n_classes, per_label, figsize=(1.7 * per_label + 3.2, 1.75 * n_classes), squeeze=False)
+    print(f"\nper-label check for {task_name} (train only):")
+    for c in range(n_classes):
+        members = by_label[c]
+        show = rng.choice(members, size=min(per_label, len(members)), replace=False) if members else []
+        ndvi_idx = rng.choice(members, size=min(max_ndvi_per_label, len(members)), replace=False) if members else []
+        ndvi = None
+        if red is not None and nir is not None and len(ndvi_idx):
+            ndvi = float(np.mean([_mean_ndvi(_sample_array(ds[int(i)])[0], red, nir) for i in ndvi_idx]))
+        for k in range(per_label):
+            ax = axes[c, k]
+            ax.set_xticks([])
+            ax.set_yticks([])
+            if k < len(show):
+                ax.imshow(_stretch(_sample_array(ds[int(show[k])])[0][..., rgb]))
+        label = f"{c}: {names[c]}"
+        if names_fixed:
+            label += f"\n(geobench: {raw_names[c]})"
+        if ndvi is not None:
+            label += f"\nNDVI {ndvi:+.2f}"
+        axes[c, 0].set_ylabel(label, rotation=0, ha="right", va="center", fontsize=8, labelpad=8)
+        ndvi_txt = f"{ndvi:+.2f}" if ndvi is not None else "n/a"
+        print(f"  label {c}: {names[c]:<26} n={len(members):<5} mean NDVI {ndvi_txt}")
+
+    fig.suptitle(f"{task_name} · {per_label} train tiles per label index · RGB 2–98% stretch"
+                 f"{' · NDVI on ≤' + str(max_ndvi_per_label) + ' tiles/label' if red is not None and nir is not None else ''}",
+                 fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.98))
+    fig_dir = Path(fig_dir)
+    fig_dir.mkdir(parents=True, exist_ok=True)
+    out = fig_dir / f"{task_name}_per_label.png"
+    fig.savefig(out, dpi=100)
+    plt.close(fig)
+    print(f"[ok] saved {out}")
+    return out
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description="GEO-Bench data reconnaissance (train + valid only).")
     ap.add_argument("tasks", nargs="+")
@@ -544,6 +663,7 @@ def main(argv: list[str] | None = None) -> None:
         inspect_task(t, args.data_dir, args.max_stats_samples, args.seed, args.stats_dir)
         if not args.no_grid:
             save_sample_grid(t, args.data_dir, seed=args.seed, fig_dir=args.fig_dir)
+            save_label_grid(t, args.data_dir, seed=args.seed, fig_dir=args.fig_dir)
 
 
 if __name__ == "__main__":

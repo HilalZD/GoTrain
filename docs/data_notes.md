@@ -60,17 +60,22 @@ python scratch/explore.py m-eurosat m-pv4ger-seg --data-dir data
 ### `stats/<task>.json`: normalisation statistics (read by `train.py`)
 ```json
 {"task": "m-eurosat", "split": "train", "n_samples": 2000, "seed": 0,
- "bands": ["B01", "B02", "..."], "mean": [ ... ], "std": [ ... ]}
+ "bands": ["B01", "B02", "..."], "mean": [ ... ], "std": [ ... ], "excluded_pixels": 0}
 ```
 - `bands`, `mean` and `std` are **parallel lists in channel order**: `mean[i]` and `std[i]` belong to `bands[i]`, which is channel `i` of the array.
 - Computed on the **train split only**, over at most 2,000 randomly chosen train images (seed 0). It uses a streaming algorithm: per-image mean and variance are merged with Chan's parallel formula and accumulated in float64.
 - `std` is the population standard deviation of pixel values.
-- Excluded pixels: NaN/inf values, and "nodata" pixels where **every** band is exactly 0.
+- Excluded pixels: NaN/inf values, and "nodata" pixels where **every** band is exactly 0. `excluded_pixels` (a single int, matching `BandStats` in `gotrain/contracts.py`) is the total number of sampled train pixels that were nodata or had at least one NaN/inf value. A NaN in one band only removes that band's value; the pixel still counts toward the other bands.
 - Usage in training: `x = (x.astype(float32) - mean[:, None, None]) / std[:, None, None]` after transposing to C×H×W.
 
 ### `stats/<task>_card.json`: full DatasetCard (future `inspect_dataset` tool)
 Shared contract keys: `task, task_type, sensor, bands, n_classes, class_names, image_size, split_sizes (train/val), class_distribution, band_mean, band_std, notes`.
-Recon extras: `dtype, value_range (min/max/p1/p99 per band), label_format, mask_unique_values, nodata_fraction, constant_bands, stats_n_samples, spatial_resolution_m, native_band_resolution_m, band_names_corrected, example_sample`.
+Recon extras: `dtype, value_range (min/max/p1/p99 per band), label_format, mask_unique_values, nodata_fraction, constant_bands, stats_n_samples, spatial_resolution_m, native_band_resolution_m, band_names_corrected, class_names_corrected, excluded_pixels, example_sample`.
+
+**Known mismatch with `DatasetCard` (`gotrain/contracts.py`):** the shared keys line up, but four recon extras have richer shapes than the contract allows, so `DatasetCard.model_validate(card)` currently fails. `class_distribution` is `{name: {count, pct}}` (the contract wants `{name: pct}`), `dtype` is a list, `value_range` is per band (the contract wants one `(min, max)`), and `mask_unique_values` is a dict (the contract wants a list of ints). The real `describe_dataset()` in `gotrain/engine/data.py` must flatten these. `stats/<task>.json` does validate against `BandStats`.
+
+### `docs/figures/<task>_per_label.png`
+Single-label classification only: one row per label index, 6 random train tiles each (seed 0). Each row is titled with the class name and the mean NDVI over up to 200 train tiles of that label (only when red and NIR bands are found by name). When a class-name errata entry is applied, the row also shows geobench's original name. This figure is the evidence for `CLASS_NAME_FIXES`.
 
 `inspect_task(task_name)` in `scratch/explore.py` returns this same dict, so it can become the agent's tool as-is.
 
@@ -91,7 +96,7 @@ Known from the brief and the source:
 Measured (`explore.py`, seed 0, stats on all 2,000 train images):
 - **Image size:** 64×64 px, 13 bands, all stored at the same size (no resampling needed). 10 m/pixel, so one tile covers 640 m × 640 m.
 - **Dtype:** int16 (reflectance × 10,000).
-- **Value ranges (train, p1–p99):** most bands sit between ~100 and ~5,400. Train means range from 751 (B09) to 2,665 (B8A); the NIR bands (B08, B8A) and red edge (B06, B07) are the brightest and most variable (std 850–1,220). **B10 (cirrus) is near zero over land:** mean 12.3, std 4.8, p1–p99 5–29, max 90. That band is why the script reports a ~185× scale gap (its note text says "8-bit channels", but here it's B10 against B8A; there are no 8-bit channels in eurosat).
+- **Value ranges (train, p1–p99):** most bands sit between ~100 and ~5,400. Train means range from 751 (B09) to 2,665 (B8A); the NIR bands (B08, B8A) and red edge (B06, B07) are the brightest and most variable (std 850–1,220). **B10 (cirrus) is near zero over land:** mean 12.3, std 4.8, p1–p99 5–29, max 90. That band is why the script reports a ~185× scale gap (p99: B10 29 vs B8A 5352).
 
   | band | B01 | B02 | B03 | B04 | B05 | B06 | B07 | B08 | B09 | B10 | B11 | B12 | B8A |
   |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
@@ -100,11 +105,13 @@ Measured (`explore.py`, seed 0, stats on all 2,000 train images):
   | p1 | 977 | 700 | 461 | 243 | 204 | 182 | 162 | 133 | 58 | 5 | 23 | 12 | 121 |
   | p99 | 2096 | 2260 | 2352 | 2845 | 2830 | 3923 | 4928 | 4858 | 1884 | 29 | 4145 | 3070 | 5352 |
 - **Class distribution:** perfectly balanced, 200 train samples per class (10.00% each). Plain cross-entropy and accuracy are fine.
-- **⚠ Class names don't match the label integers** (see gotcha 14). The integers are consistent, but geobench's `class_names` list is in the wrong order.
+- **Class names corrected** (gotcha 14). geobench's `class_names` list is out of order; `explore.py` now uses the verified label order `0 Annual Crop, 1 Forest, 2 Herbaceous Vegetation, 3 Highway, 4 Industrial Buildings, 5 Pasture, 6 Permanent Crop, 7 Residential Buildings, 8 River, 9 Sea and Lake`.
+- **Mean NDVI per label (train, 200 tiles each):** Annual Crop +0.39, Forest +0.71, Herbaceous Vegetation +0.38, Highway +0.45, Industrial +0.22, Pasture +0.65, Permanent Crop +0.36, Residential +0.33, River +0.34, Sea and Lake −0.25.
 - **Nodata:** 0.0000% (no all-zero pixels, no NaN/inf). **Constant bands:** none.
 - **Duplicates / leakage:** none. 0 exact duplicates among the 2,000 train images, and 0 of the 1,000 val images match a train image byte for byte.
-- **Notes from the script:** band names corrected (errata); ~185× band-scale gap, so per-band normalisation is mandatory.
-- **Sample figure:** the tiles are real Sentinel-2 landscapes (fields, rivers, housing grids, industrial roofs), but the titles are wrong because of gotcha 14. Uniform tiles (water, dense forest) look like coloured static under the 2–98% stretch: the stretch amplifies tiny sensor noise when a tile has almost no contrast. That's a display artefact, not bad data.
+- **Notes from the script:** band names corrected (errata); class names corrected (errata); ~185× band-scale gap (B10 vs B8A), so per-band normalisation is mandatory.
+- **Excluded pixels:** 0 (`excluded_pixels` in `stats/m-eurosat.json`).
+- **Sample figure:** the tiles are real Sentinel-2 landscapes (fields, rivers, housing grids, industrial roofs), and with the class-name fix the titles now match the content. `m-eurosat_per_label.png` shows 6 tiles for every label. Uniform tiles (water, dense forest) look like coloured static under the 2–98% stretch: the stretch amplifies tiny sensor noise when a tile has almost no contrast. That's a display artefact, not bad data.
 
 ### m-pv4ger-seg (segmentation)
 Known from the brief:
@@ -144,12 +151,13 @@ Measured (`explore.py`, seed 0, pixel stats on 2,000 of 3,000 train images, labe
 11. **Don't normalise with geobench's own `band_stats.json`.** Each task ships one, but we can't verify which splits it was computed on. We use our own train-only stats.
 12. **Duplicate and leakage check is sample-based.** It compares exact byte hashes of the ≤2,000 sampled train images against ≤2,000 val images. Near-duplicates (shifted or recompressed images) are not detected.
 13. **Upstream multilabel quirk.** `MultiLabelClassification` stores names in `class_name` (typo), so `.class_names` is empty. `explore.py` handles it; reuse `_class_names()` for m-bigearthnet.
-14. **m-eurosat class names are in the wrong order (found 2026-10-31).** geobench lists `Industrial, Residential, Annual Crop, Permanent Crop, River, Sea and Lake, Herbaceous Vegetation, Highway, Pasture, Forest`, but the label integers follow the **original alphabetical EuroSAT order**: `0 AnnualCrop, 1 Forest, 2 HerbaceousVegetation, 3 Highway, 4 Industrial, 5 Pasture, 6 PermanentCrop, 7 Residential, 8 River, 9 SeaLake`. Evidence (train only):
-    - Per-label mean spectra. Label 9 ("Forest") has NIR 351 and NDVI −0.23, which only water produces, so it's SeaLake. Label 1 ("Residential") has NDVI 0.72, dark RGB and very low texture, so it's Forest. Label 4 ("River") is the brightest, most variable class, so it's Industrial. Label 5 ("Sea and Lake") has NDVI 0.66, which fits Pasture.
-    - All 8 tiles in `m-eurosat_samples.png` match the alphabetical name, not the geobench name.
+14. **m-eurosat class names are out of order upstream; corrected via `CLASS_NAME_FIXES` (found and verified 2026-10-31).** geobench lists `Industrial, Residential, Annual Crop, Permanent Crop, River, Sea and Lake, Herbaceous Vegetation, Highway, Pasture, Forest`, but the label integers follow the **original alphabetical EuroSAT order**: `0 Annual Crop, 1 Forest, 2 Herbaceous Vegetation, 3 Highway, 4 Industrial Buildings, 5 Pasture, 6 Permanent Crop, 7 Residential Buildings, 8 River, 9 Sea and Lake`. Evidence, train split only:
+    - **`docs/figures/m-eurosat_per_label.png`** shows 6 random train tiles for every label index. Before the fix, all 10 rows matched the alphabetical name, not the geobench name: 0 large ploughed/striped fields, 1 dense canopy, 2 scrub and sparse vegetation on rocky slopes, 3 motorways and an interchange, 4 large roofs and a stadium, 5 uniform grassland, 6 small strip parcels (orchard/vineyard style; the least distinctive row, but consistent and the only label left), 7 dense housing, 8 a river in every tile, 9 flat water.
+    - **Mean NDVI per label** (≤200 tiles each): label 9 is −0.25 (only water gives negative NDVI), label 1 is +0.71 (the highest, i.e. forest), label 5 is +0.65 (grassland), and label 4 is +0.22 (the lowest land value, i.e. buildings).
+    - The 8 tiles in `m-eurosat_samples.png` also match.
 
-    **Accuracy is unaffected** (the integers are consistent across splits), but **any human-readable class name is wrong**: per-class metrics, confusion matrices, the DatasetCard's `class_names` / `class_distribution`, and lessons written to memory. `explore.py` still prints geobench's names, because the no-task-specific-logic rule allows only the band errata table. Decide as a team whether to add a class-name errata entry (or to show names from the alphabetical list) before per-class results are reported. Not yet checked against the upstream issue tracker.
-15. **`native_band_resolution_m` in the eurosat card is unreliable.** It pairs the corrected band names with resolution metadata stored under the old, wrong labels (e.g. it says B08 is 20 m; it's 10 m). Use the primer table in section 6 instead. It doesn't matter for training: every eurosat band is stored at 64×64.
+    The fix is the errata table `CLASS_NAME_FIXES` in `scratch/explore.py`, next to `BAND_ORDER_FIXES` and under the same rule: upstream data errata only, with the evidence cited in a comment. It is a pure reordering of geobench's own name strings. `inspect_task` and both grids apply it; the card records `"class_names_corrected": true`, and its notes give the label order. **Accuracy was never affected** (the integers are consistent across splits); this only fixes the human-readable names (per-class metrics, confusion matrices, the DatasetCard, lessons in memory). **`train.py`, and any code that maps label integers to names, must use the corrected list, not `task.label_type.class_names`.** Not yet reported upstream.
+15. **Native band resolutions for corrected bands come from the Sentinel-2 table.** The stored `spatial_resolution` metadata belongs to the mislabelled names, so when band names are corrected, `explore.py` takes `native_band_resolution_m` from the standard Sentinel-2 table instead (10 m: B02 B03 B04 B08; 20 m: B05 B06 B07 B8A B11 B12; 60 m: B01 B09 B10). Names outside that table (e.g. brick-kiln's `TCI_R/G/B`) get `null`. It doesn't matter for training: every eurosat band is stored at 64×64.
 16. **B10 (cirrus) is almost empty in eurosat** (mean 12, std 4.8, versus thousands for other bands). After per-band standardisation it's mostly noise. It's a cheap candidate to drop, and the agent may find that on its own.
 17. **pv4ger-seg has almost no panel-free tiles** (6 of 3,000). A model trained on it rarely sees an empty roof, so it may over-predict panels on images without any. Validation has the same bias, so val IoU won't reveal this.
 18. **`download_tasks.py` zip-slip guard was POSIX-only.** It compared against `str(dest) + "/"`, so on Windows (paths with `\`) every zip member was refused, starting with `m-eurosat/`. It's fixed with `Path.is_relative_to`, which keeps the protection on any OS.

@@ -58,5 +58,14 @@ Then compare the best val score reached and how many trials it took to get there
 ## Engine contract (added with the scaffold)
 
 The real engine plugs in through `gotrain/engine/interface.py`:
-`gotrain.engine.train` provides `train()` and `evaluate()`, and
+`gotrain.engine.train` provides `train()`, `evaluate()` and `diagnose()`, and
 `gotrain.engine.data` provides `describe_dataset()`. Until those exist, `GOTRAIN_ENGINE=fake`.
+
+`diagnose(task, run_dir) -> dict` was added in agreement with Serena. It returns
+`per_class` metrics, `confusion_matrix` (rows = true class, row-normalised),
+`curve_verdict` (`"overfitting"` | `"underfitting"` | `"fine"`) and an optional `error_grid_path`.
+
+## Budget
+
+Each task has a fixed GPU budget in minutes, set once by a human (`init_task_budget`).
+Tools refuse to start a trial that would exceed what remains. The agent cannot raise it.

@@ -452,3 +452,11 @@ per-image intersection/union (segmentation), micro-F1 (multilabel). `TestRecord`
 `ci_low`, `ci_high`, `ci_level`, `ci_resamples` (old records load with `None`); the lock file and
 ledger carry them, and a "Test result" section is appended to the version's model card. A CI
 failure never loses the score: the record is then written without a CI.
+
+## Results export (M5)
+
+`gotrain export --out results/ [--home H ...]` (default GOTRAIN_HOME) copies leaderboards, seed groups,
+budget, test records, model cards/versions, journals, queue_status, label-efficiency files and
+lessons into `results/<home name>/` (never checkpoints) and writes `results/summary.md`: a table
+per task (val mean ± std, test + CI, GPU minutes, Bedrock tokens from session_end usage) with
+published references and the human baseline from `targets.json`.

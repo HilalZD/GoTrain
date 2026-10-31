@@ -251,3 +251,24 @@ def test_registering_a_seed_group_member_registers_the_original_run_with_mean_he
     )
     row = next(r for r in leaderboard(TASK)["top"] if r["run_id"] == base)
     assert row["val_headline"].startswith(stats["mean_std"]) and "single run" in row["val_headline"]
+
+
+def test_inspect_dataset_exposes_majority_baseline_and_flat_tiles(monkeypatch):
+    from gotrain.contracts import DatasetCard
+    from gotrain.engine import get_engine
+    from gotrain.tools import inspect as inspect_mod
+
+    base = get_engine().describe_dataset(TASK).model_dump()
+    old = {
+        k: v for k, v in base.items() if k not in ("majority_class_baseline", "flat_tile_fraction")
+    }
+    card = DatasetCard.model_validate(old)  # old cards still load
+    assert card.majority_class_baseline is None and card.flat_tile_fraction is None
+    assert "majority_class_baseline" not in inspect_mod.summarize_card(card)
+
+    rich = DatasetCard.model_validate(
+        old | {"majority_class_baseline": 0.97, "flat_tile_fraction": {"a": 0.4}}
+    )
+    summary = inspect_mod.summarize_card(rich)
+    assert summary["majority_class_baseline"] == 0.97
+    assert summary["flat_tile_fraction"] == {"a": 0.4}

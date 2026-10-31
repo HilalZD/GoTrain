@@ -465,3 +465,8 @@ published references and the human baseline from `targets.json`.
 
 - Queue files are per plan: `queue_status_<plan>.json`, `logs/queue/<plan>/`; export reads all `queue_status_*.json`. Appends (lessons, journals, leaderboards) take a lock file next to the target, so two writers on one disk never interleave.
 - `register_model(run_id)` of a seed-group member registers the group ORIGINAL run (as the harness does). `ModelVersion` gains `val_std`, `val_n`, `single_val_score`; `val_score` is then the group mean, the model card headline is mean ± std with the single-run score second, and leaderboard rows carry `val_headline`. Ensembles/TTA keep their measured score.
+
+## Single-GPU queue, imbalance fields
+
+- `configs/overnight.yaml` replaces overnight_a/b (one queue, one GPU); `configs/smoke.yaml` is a 4-min real-engine check in `~/gotrain_smoke`. `launch_overnight.sh` exports `GOTRAIN_DATA_CACHE` (default `~/data_cache`, the engine default) and refuses if it is missing.
+- `DatasetCard` gains optional `majority_class_baseline` and `flat_tile_fraction`; `inspect_dataset` shows them when set; the tune prompt says to use minority-class F1/recall when the baseline is high or a class has many flat tiles.

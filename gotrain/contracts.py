@@ -141,6 +141,12 @@ class DatasetCard(BaseModel):
     nodata_fraction: float | None = Field(default=None, ge=0.0, le=1.0)
     constant_bands: list[str] | None = None
     stats_n_samples: int | None = Field(default=None, ge=1)
+    majority_class_baseline: float | None = Field(
+        default=None, ge=0.0, le=1.0, description="Accuracy of always predicting the top class."
+    )
+    flat_tile_fraction: dict[str, float] | None = Field(
+        default=None, description="Per class: fraction of its tiles that are (nearly) constant."
+    )
 
     @field_validator("image_size", mode="before")
     @classmethod

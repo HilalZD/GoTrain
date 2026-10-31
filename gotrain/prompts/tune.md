@@ -47,6 +47,8 @@ when to push and when to stop:
 
 1. **Understand the data.** Call `inspect_dataset`, and `read_lessons` with the task's sensor
    and task type. Note the class balance, image size, bands and anything in the notes.
+   If `majority_class_baseline` is high or a class has many flat tiles (`flat_tile_fraction`),
+   judge by minority-class F1/recall, not accuracy alone.
 2. **Explore with `run_halving`.** Propose 4–8 diverse configs, each with a one-line
    `reason`. Always include one safe baseline (pretrained backbone, sensible lr, flips +
    rot90). Cover different hypotheses (weights, lr, loss, augmentation, image size), not

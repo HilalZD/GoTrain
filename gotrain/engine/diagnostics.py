@@ -180,9 +180,10 @@ def save_error_grid(path: Path, ckpt: dict, preds: dict, idx: list[int]) -> Path
     from gotrain.engine.train import checkpoint_dataset
 
     ds = checkpoint_dataset(ckpt, "val")
-    bands, names = ckpt["spec"]["bands"], ckpt["class_names"]
-    channel = [ds.all_bands.index(b) for b in bands]
-    rgb = [channel[i] for i in rgb_indices(bands)]
+    names = ckpt["class_names"]
+    # ds.raw() returns the bands ON DISK (ds.all_bands). The model's own bands may include
+    # zero-filled ones the task lacks (ssl4eo_s2 on m-brick-kiln: B06, B09, B10), so pick RGB here.
+    rgb = rgb_indices(ds.all_bands)
     seg = ckpt["task_type"] == "segmentation"
     cols = 3 if seg else 4
     rows = len(idx) if seg else int(np.ceil(len(idx) / cols))

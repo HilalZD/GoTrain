@@ -205,3 +205,59 @@ def test_extra_metric_reaches_metrics_json_and_diagnose(tmp_path, monkeypatch):
     out = engine.diagnose("m-pv4ger-seg", run)
     assert out["miou_excl_nodata"] == metrics["miou_excl_nodata"]
     assert summarize_diagnosis(out)["per_class_metric"] == "iou"  # Hilal's tool still works
+
+
+# ------------------------------------------------------------ zero-filled bands (SageMaker bug)
+@pytest.mark.skipif(not have("m-eurosat"), reason="needs geobench + m-eurosat on disk")
+def test_error_grid_ignores_zero_filled_bands_that_are_not_on_disk(tmp_path):
+    """SageMaker: ssl4eo_s2 on m-brick-kiln zero-fills B06/B09/B10, which are not on disk, and
+    save_error_grid crashed with "'B06' is not in list". Same situation here with 'B99'."""
+    names = data.describe_dataset("m-eurosat").class_names
+    ckpt = {
+        "task": "m-eurosat",
+        "task_type": "classification",
+        "class_names": names,
+        "spec": {"bands": ["B99", "B04", "B03", "B02"], "zero_fill": ["B99"]},
+        "norm_mean": [0.0] * 4,
+        "norm_std": [10000.0] * 4,
+    }
+    n_val = 1000
+    rng = np.random.default_rng(0)
+    probs = rng.dirichlet(np.ones(10), size=n_val).astype(np.float32)
+    preds = {"y_true": rng.integers(0, 10, n_val), "y_pred": probs.argmax(1), "probs": probs}
+    out = diag.save_error_grid(tmp_path / "errors.png", ckpt, preds, [0, 1, 2])
+    assert out.exists() and out.stat().st_size > 0
+
+
+def _ssl4eo50_cached() -> bool:
+    hub = Path(torch.hub.get_dir()) / "checkpoints"
+    return any(hub.glob("resnet50_sentinel2_all_moco-*.pth"))
+
+
+@pytest.mark.skipif(not have("m-eurosat"), reason="needs geobench + m-eurosat on disk")
+@pytest.mark.skipif(not _ssl4eo50_cached(), reason="SSL4EO resnet50 weights not downloaded")
+def test_diagnose_on_a_zero_fill_run(tmp_path):
+    """diagnose() end to end on an ssl4eo_s2 run where 9 of the 13 model inputs are zero-filled."""
+    import json
+
+    run = tmp_path / "m-eurosat-zerofill-0001"
+    config = TrainConfig(
+        task="m-eurosat",
+        backbone="resnet50",
+        weights="ssl4eo_s2",
+        img_size=64,
+        batch_size=16,
+        lr=1e-4,
+        max_epochs=1,
+        loss="ce",
+        bands=["B02", "B03", "B04", "B08"],
+        train_subset_frac=0.05,
+        reason="zero-fill diagnose test",
+    )
+    result = engine.train(config, 600.0, run)
+    assert result.status == "ok", result.error
+    metrics = json.loads((run / "metrics.json").read_text())
+    assert len(metrics["zero_filled_bands"]) == 9
+    out = engine.diagnose("m-eurosat", run)
+    assert out["error_grid_path"] and Path(out["error_grid_path"]).exists()
+    assert not (run / "errors_failed.txt").exists()

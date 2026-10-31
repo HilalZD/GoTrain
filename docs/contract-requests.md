@@ -57,3 +57,15 @@ Each entry: what, why, and the smallest change that would do it.
   baselines don't use the engine at all, and engine runs are real anyway.
 - **Possible change (yours):** also accept names containing `_dev_` (e.g. `gotrain_dev_serena`)
   as dev homes, if you want fake runs to work there.
+
+## 6. Test-time augmentation flag on evaluate() (M6, needs a small interface change)
+
+- **What exists:** `gotrain.engine.train.evaluate(task, checkpoint_path, split, tta=False)`.
+  `tta=True` averages the model's outputs over the 8 flip/rot90 views (for segmentation, each
+  view's mask is rotated back before averaging). The result dict also carries `"tta"`.
+- **What's missing (your files):** `Engine.evaluate` / `RealEngine.evaluate` in
+  `gotrain/engine/interface.py` don't pass the flag, so the agent can't use it yet.
+  Smallest change: add `tta: bool = False` to the Protocol and to `RealEngine.evaluate`,
+  forwarding it; `FakeEngine.evaluate` can accept and ignore it.
+- **Rule to keep:** choose TTA on VALIDATION only (compare `evaluate(..., "val", tta=True)`
+  with `tta=False`), then pass the same choice to `final_test`. Never decide it on test.

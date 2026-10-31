@@ -282,6 +282,8 @@ def test_eurosat_trial_end_to_end(tmp_path):
     out = engine.evaluate("m-eurosat", result.checkpoint_path, "val")
     assert out["metric_name"] == "accuracy"
     assert out["score"] == pytest.approx(result.val_score, abs=1e-4)
+    tta = engine.evaluate("m-eurosat", result.checkpoint_path, "val", tta=True)
+    assert tta["tta"] is True and 0.0 <= tta["score"] <= 1.0
 
 
 @pytest.mark.skipif(not have("m-eurosat"), reason="m-eurosat not downloaded")
@@ -299,3 +301,5 @@ def test_pv4ger_segmentation_trial_end_to_end(tmp_path):
     assert result.metric_name == "miou" and 0.0 <= result.val_score <= 1.0
     preds = np.load(run / "val_predictions.npz")
     assert preds["pred_masks"].shape == (403, 320, 320)  # scored at native resolution
+    tta = engine.evaluate("m-pv4ger-seg", result.checkpoint_path, "val", tta=True)
+    assert tta["metric_name"] == "miou" and 0.0 <= tta["score"] <= 1.0

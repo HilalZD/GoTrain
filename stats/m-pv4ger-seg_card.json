@@ -1,0 +1,118 @@
+{
+  "task": "m-pv4ger-seg",
+  "task_type": "segmentation",
+  "sensor": "aerial-rgb",
+  "bands": [
+    "Red",
+    "Green",
+    "Blue"
+  ],
+  "n_classes": 2,
+  "class_names": [
+    "no solar pv",
+    "solar pv"
+  ],
+  "image_size": [
+    320,
+    320
+  ],
+  "split_sizes": {
+    "train": 3000,
+    "val": 403
+  },
+  "class_distribution": {
+    "no solar pv": {
+      "count": 245883455,
+      "pct": 80.04
+    },
+    "solar pv": {
+      "count": 61316545,
+      "pct": 19.96
+    }
+  },
+  "band_mean": [
+    131.052214,
+    137.338932,
+    139.441982
+  ],
+  "band_std": [
+    54.84421,
+    51.297786,
+    48.907292
+  ],
+  "notes": [],
+  "dtype": [
+    "uint8"
+  ],
+  "value_range": {
+    "Red": {
+      "min": 2.0,
+      "max": 255.0,
+      "p1": 29.0,
+      "p99": 241.0
+    },
+    "Green": {
+      "min": 1.0,
+      "max": 255.0,
+      "p1": 41.0,
+      "p99": 242.0
+    },
+    "Blue": {
+      "min": 6.0,
+      "max": 255.0,
+      "p1": 51.0,
+      "p99": 241.0
+    }
+  },
+  "label_format": "mask 320x320 (uint8), one class index per pixel",
+  "mask_unique_values": {
+    "values": {
+      "0": 245883455,
+      "1": 61316545
+    },
+    "is_0_1": true,
+    "is_0_255": false,
+    "ignore_values": []
+  },
+  "nodata_fraction": 0.0,
+  "constant_bands": [],
+  "stats_n_samples": 2000,
+  "spatial_resolution_m": 0.1,
+  "native_band_resolution_m": {
+    "Red": 0.1,
+    "Green": 0.1,
+    "Blue": 0.1
+  },
+  "band_names_corrected": false,
+  "class_names_corrected": false,
+  "excluded_pixels": 0,
+  "example_sample": {
+    "name": "7.001829544,52.21933747",
+    "shape_hwc": [
+      320,
+      320,
+      3
+    ],
+    "dtype": "uint8",
+    "bands": [
+      {
+        "band": "Red",
+        "min": 35.0,
+        "max": 244.0,
+        "mean": 104.071064453125
+      },
+      {
+        "band": "Green",
+        "min": 46.0,
+        "max": 238.0,
+        "mean": 98.9281640625
+      },
+      {
+        "band": "Blue",
+        "min": 55.0,
+        "max": 245.0,
+        "mean": 100.344765625
+      }
+    ]
+  }
+}

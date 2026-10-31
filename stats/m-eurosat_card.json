@@ -1,0 +1,314 @@
+{
+  "task": "m-eurosat",
+  "task_type": "classification",
+  "sensor": "sentinel-2",
+  "bands": [
+    "B01",
+    "B02",
+    "B03",
+    "B04",
+    "B05",
+    "B06",
+    "B07",
+    "B08",
+    "B09",
+    "B10",
+    "B11",
+    "B12",
+    "B8A"
+  ],
+  "n_classes": 10,
+  "class_names": [
+    "Annual Crop",
+    "Forest",
+    "Herbaceous Vegetation",
+    "Highway",
+    "Industrial Buildings",
+    "Pasture",
+    "Permanent Crop",
+    "Residential Buildings",
+    "River",
+    "Sea and Lake"
+  ],
+  "image_size": [
+    64,
+    64
+  ],
+  "split_sizes": {
+    "train": 2000,
+    "val": 1000
+  },
+  "class_distribution": {
+    "Annual Crop": {
+      "count": 200,
+      "pct": 10.0
+    },
+    "Forest": {
+      "count": 200,
+      "pct": 10.0
+    },
+    "Herbaceous Vegetation": {
+      "count": 200,
+      "pct": 10.0
+    },
+    "Highway": {
+      "count": 200,
+      "pct": 10.0
+    },
+    "Industrial Buildings": {
+      "count": 200,
+      "pct": 10.0
+    },
+    "Pasture": {
+      "count": 200,
+      "pct": 10.0
+    },
+    "Permanent Crop": {
+      "count": 200,
+      "pct": 10.0
+    },
+    "Residential Buildings": {
+      "count": 200,
+      "pct": 10.0
+    },
+    "River": {
+      "count": 200,
+      "pct": 10.0
+    },
+    "Sea and Lake": {
+      "count": 200,
+      "pct": 10.0
+    }
+  },
+  "band_mean": [
+    1359.947383,
+    1125.533093,
+    1054.995043,
+    957.344447,
+    1219.668072,
+    2051.619165,
+    2433.601782,
+    2360.096063,
+    751.164088,
+    12.288122,
+    1848.902175,
+    1131.269394,
+    2665.438086
+  ],
+  "band_std": [
+    251.330841,
+    339.683699,
+    396.731971,
+    592.835808,
+    555.012919,
+    852.502011,
+    1081.56749,
+    1115.114399,
+    404.570034,
+    4.796578,
+    978.825879,
+    745.281771,
+    1223.879199
+  ],
+  "notes": [
+    "Band names corrected: the published data mislabels channels (https://github.com/ServiceNow/geo-bench#known-issues). True order: B01, B02, B03, B04, B05, B06, B07, B08, B09, B10, B11, B12, B8A.",
+    "Class names corrected: geobench's class_names list does not match the label integers (see data_notes.md gotcha 14). Label order: 0 Annual Crop, 1 Forest, 2 Herbaceous Vegetation, 3 Highway, 4 Industrial Buildings, 5 Pasture, 6 Permanent Crop, 7 Residential Buildings, 8 River, 9 Sea and Lake.",
+    "band value scales differ by ~185x (p99: B10 29 vs B8A 5352): per-band normalisation is mandatory."
+  ],
+  "dtype": [
+    "int16"
+  ],
+  "value_range": {
+    "B01": {
+      "min": 858.0,
+      "max": 6805.0,
+      "p1": 977.0,
+      "p99": 2096.0
+    },
+    "B02": {
+      "min": 0.0,
+      "max": 28000.0,
+      "p1": 700.0,
+      "p99": 2260.0
+    },
+    "B03": {
+      "min": 0.0,
+      "max": 28000.0,
+      "p1": 461.0,
+      "p99": 2352.0
+    },
+    "B04": {
+      "min": 0.0,
+      "max": 28000.0,
+      "p1": 243.0,
+      "p99": 2845.0
+    },
+    "B05": {
+      "min": 182.0,
+      "max": 23381.0,
+      "p1": 204.0,
+      "p99": 2830.0
+    },
+    "B06": {
+      "min": 157.0,
+      "max": 24975.0,
+      "p1": 182.0,
+      "p99": 3923.0
+    },
+    "B07": {
+      "min": 131.0,
+      "max": 25412.0,
+      "p1": 162.0,
+      "p99": 4928.010000000009
+    },
+    "B08": {
+      "min": 0.0,
+      "max": 28002.0,
+      "p1": 133.0,
+      "p99": 4858.0
+    },
+    "B09": {
+      "min": 41.0,
+      "max": 3761.0,
+      "p1": 58.0,
+      "p99": 1884.0
+    },
+    "B10": {
+      "min": 1.0,
+      "max": 90.0,
+      "p1": 5.0,
+      "p99": 29.0
+    },
+    "B11": {
+      "min": 7.0,
+      "max": 24704.0,
+      "p1": 23.0,
+      "p99": 4145.010000000009
+    },
+    "B12": {
+      "min": 1.0,
+      "max": 22210.0,
+      "p1": 12.0,
+      "p99": 3070.0
+    },
+    "B8A": {
+      "min": 95.0,
+      "max": 25752.0,
+      "p1": 121.0,
+      "p99": 5352.0
+    }
+  },
+  "label_format": "single integer class index (int)",
+  "mask_unique_values": null,
+  "nodata_fraction": 0.0,
+  "constant_bands": [],
+  "stats_n_samples": 2000,
+  "spatial_resolution_m": 10.0,
+  "native_band_resolution_m": {
+    "B01": 60,
+    "B02": 10,
+    "B03": 10,
+    "B04": 10,
+    "B05": 20,
+    "B06": 20,
+    "B07": 20,
+    "B08": 10,
+    "B09": 60,
+    "B10": 60,
+    "B11": 20,
+    "B12": 20,
+    "B8A": 20
+  },
+  "band_names_corrected": true,
+  "class_names_corrected": true,
+  "excluded_pixels": 0,
+  "example_sample": {
+    "name": "id_12886",
+    "shape_hwc": [
+      64,
+      64,
+      13
+    ],
+    "dtype": "int16",
+    "bands": [
+      {
+        "band": "B01",
+        "min": 1133.0,
+        "max": 1457.0,
+        "mean": 1220.902587890625
+      },
+      {
+        "band": "B02",
+        "min": 779.0,
+        "max": 2711.0,
+        "mean": 989.6044921875
+      },
+      {
+        "band": "B03",
+        "min": 605.0,
+        "max": 2676.0,
+        "mean": 884.27099609375
+      },
+      {
+        "band": "B04",
+        "min": 366.0,
+        "max": 2829.0,
+        "mean": 766.598876953125
+      },
+      {
+        "band": "B05",
+        "min": 820.0,
+        "max": 2090.0,
+        "mean": 1053.365966796875
+      },
+      {
+        "band": "B06",
+        "min": 1126.0,
+        "max": 3081.0,
+        "mean": 1784.923828125
+      },
+      {
+        "band": "B07",
+        "min": 1224.0,
+        "max": 3809.0,
+        "mean": 2048.90234375
+      },
+      {
+        "band": "B08",
+        "min": 799.0,
+        "max": 4457.0,
+        "mean": 1996.826171875
+      },
+      {
+        "band": "B09",
+        "min": 556.0,
+        "max": 1093.0,
+        "mean": 760.447509765625
+      },
+      {
+        "band": "B10",
+        "min": 9.0,
+        "max": 15.0,
+        "mean": 12.01220703125
+      },
+      {
+        "band": "B11",
+        "min": 1177.0,
+        "max": 2309.0,
+        "mean": 1587.108154296875
+      },
+      {
+        "band": "B12",
+        "min": 699.0,
+        "max": 1726.0,
+        "mean": 1074.74072265625
+      },
+      {
+        "band": "B8A",
+        "min": 1275.0,
+        "max": 4037.0,
+        "mean": 2188.43359375
+      }
+    ]
+  }
+}

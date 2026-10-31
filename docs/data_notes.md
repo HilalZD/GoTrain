@@ -168,13 +168,23 @@ Measured with `scratch/speed_check.py` on this laptop's CPU, 300 m-eurosat train
 - **On the T4 the picture flips (estimate, not measured):** the GPU trains a 64 px resnet18 tile in well under 1 ms and a 224 px resnet50 tile in roughly 3-4 ms, while loading stays CPU work at ~2 ms/tile even with 4 workers. So for 64 px trials **loading would dominate**, about 30 s of a ~40 s epoch, and it is comparable at 224 px. Brick-kiln stores float64, 4x eurosat's int16 bytes, so its reads may be slower still.
 - **Measure it for real on SageMaker:** `scratch/speed_check.py m-brick-kiln --n 300` (GPU free, PYTHONPATH inline). If load/train > ~0.5 for the configs the agent uses, build the cache below.
 
-**Proposal (not built): one-time `.npy` cache under `~/data_cache`.**
-- `~/data_cache/<task>/{train,val}_x.npy` (float32, N x C x H x W, all bands in card order, unnormalised), `{train,val}_y.npy`, plus `meta.json` (bands, sample names, source folder, geobench version, created_at).
-- Built once per task by a small script (a few minutes for brick-kiln). Size: 3.2 GB train + 0.2 GB val for brick-kiln.
-- `GeoBenchDataset(..., cache_dir=...)` would read rows with `np.load(..., mmap_mode="r")`: no per-tile hdf5 parsing, page-cached after the first epoch, and safe with several DataLoader workers. Normalisation, band selection and zero-fill stay exactly as today, on the fly.
-- Falls back to hdf5 if the cache is missing or `meta.json` doesn't match (bands, counts, source path).
-- **The test split is never cached.** `evaluate(..., test)` keeps reading hdf5 through the guarded path, so the cache can't become a side door to test data.
-- Outside the repo and outside `~/data`, so it never touches Hilal's files or the shared dataset.
+**Built: one-time `.npy` cache under `~/data_cache`** (SageMaker confirmed that loading dominates).
+- `scripts/build_cache.py <tasks...>` writes `<cache>/<task>/{train,val}_x.npy` (float32 [N, H, W, C], all bands in card order, raw units), `{train,val}_y.npy` (labels; int16 masks) and `{split}_meta.json`. The cache root is `$GOTRAIN_DATA_CACHE`, default `~/data_cache`.
+- **CPU only:** the script clears `CUDA_VISIBLE_DEVICES` and never imports torch, so it runs on either machine while that machine's GPU trains. It refuses to start without 10% spare disk, skips splits whose cache is already valid, and `--dry-run` prints the plan and writes nothing.
+- **Automatic and safe:** `GeoBenchDataset` memory-maps the cache when `meta.json` matches. The fingerprint covers the format version, task, split, bands, sample list and total size of the split's hdf5 files. Otherwise it reads hdf5 as before. A stale cache is ignored until rebuilt; `--force` rebuilds a valid one. `metrics.json` records `data_cache: {train, val}`.
+- **Identical results:** tensors from both paths are byte-identical (tested for eurosat and pv4ger-seg), and a training run scores the same with and without the cache (tested).
+- **The test split is never cached.** `load_cache` and `build_split_cache` refuse it, so `evaluate(..., test)` always reads the original files through the guarded path.
+- **Expected disk use** (float32 images + labels):
+
+  | task | train | val | total |
+  |---|---|---|---|
+  | m-eurosat | 0.43 GB | 0.21 GB | **0.64 GB** |
+  | m-brick-kiln | 3.21 GB | 0.21 GB | **3.42 GB** |
+  | m-pv4ger-seg | 4.30 GB | 0.58 GB | **4.88 GB** |
+  | m-chesapeake | 3.54 GB | 1.18 GB | **4.72 GB** |
+  | all four | | | **≈ 13.7 GB** (SageMaker has ~90 GB free) |
+
+  eurosat and pv4ger-seg are from the script's `--dry-run`; brick-kiln and chesapeake are computed from their shapes (64x64x13 and 256x256x4 tiles, int16 masks) and match what `--dry-run` prints on SageMaker.
 
 ### GEO-Bench reference scores vs ours
 Best published baseline per task, from GEO-Bench's own results files (`baseline_classification_results.csv`, `baseline_segmentation_results.csv` in [ServiceNow/geo-bench](https://github.com/ServiceNow/geo-bench), main at commit `17cac9b`; the CSVs last changed in `5a5a763`, 2024-01-15). Reproduced with the repo's own method (`geobench/baseline_results.ipynb`: `plot_tools.extract_1x_data` keeps runs on 100% of train, then `avergage_seeds` takes the mean over seeds). "Best" = highest mean **test** score.

@@ -45,6 +45,15 @@ and gives the agent a summary card of the dataset (`describe_dataset`).
 - *What happens with a task you've never seen?* Nothing in the code is task-specific except the
   errata tables, so the card, the dataset and training work unchanged ("zero-touch").
 
+**The data cache (part of `data.py`, built by `scripts/build_cache.py`).** Reading each tile from
+its own hdf5 file every epoch was the bottleneck on the T4. The cache stores TRAIN and VAL once as
+float32 `.npy` arrays in `~/data_cache`, and the dataset memory-maps them.
+- *Is it safe?* It's used only while a fingerprint matches the source files (format version, task,
+  bands, sample list, file sizes); otherwise the engine reads hdf5. Tests check that both paths
+  give byte-identical tensors.
+- *Could it leak test data?* No. The test split is never cached: both the builder and the loader
+  refuse it, so the final test always reads the original files.
+
 ## `gotrain/engine/models.py`: the model menu
 
 **What it does.** It builds a classifier (timm) or a U-Net (segmentation_models_pytorch) for any

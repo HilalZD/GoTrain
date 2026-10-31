@@ -712,6 +712,10 @@ def _train(
             "minutes_used": round(minutes, 3),
             "budget_minutes": budget_minutes,
             "n_train": len(train_ds),
+            "data_cache": {
+                "train": train_ds.disk_cache is not None,
+                "val": val_ds.disk_cache is not None,
+            },
             "n_val": len(val_ds),
             "device": str(device),
             "bands": bands,

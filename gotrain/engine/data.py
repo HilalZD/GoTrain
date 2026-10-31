@@ -810,6 +810,118 @@ def describe_dataset(task: str) -> DatasetCard:
 
 
 # ---------------------------------------------------------------------------------------------
+# 2d. One-time .npy cache of TRAIN and VAL (never the test split)
+# ---------------------------------------------------------------------------------------------
+# Loading every tile from its own hdf5 file each epoch dominates training time on the T4
+# (brick-kiln speed check). scripts/build_cache.py writes each split once as float32 arrays:
+#   <cache root>/<task>/<split>_x.npy   [N, H, W, C] float32, all bands in card order, raw units
+#   <cache root>/<task>/<split>_y.npy   labels (int64 [N] | float32 [N, K] | int16/int32 masks)
+#   <cache root>/<task>/<split>_meta.json   format, fingerprint, bands, shapes
+# GeoBenchDataset memory-maps them when the fingerprint still matches the source files;
+# otherwise it reads hdf5 as before. Results are identical either way (tested).
+CACHE_FORMAT = 1
+CACHE_SPLITS = ("train", "val")  # the test split is NEVER cached
+
+
+def cache_root() -> Path:
+    """GOTRAIN_DATA_CACHE, default ~/data_cache (outside the repo and the shared ~/data)."""
+    return Path(os.environ.get("GOTRAIN_DATA_CACHE", "~/data_cache")).expanduser()
+
+
+def split_fingerprint(task_name: str, split: str, ds: Any, bands: list[str]) -> str:
+    """Changes whenever the cached content could: format, task, split, bands, sample list, and
+    the total size of the split's hdf5 files (a re-download or edit changes it)."""
+    names = list(ds.active_partition.partition_dict[ds.split])
+    total = sum(
+        (Path(ds.dataset_dir) / f"{n}.hdf5").stat().st_size
+        for n in names
+        if (Path(ds.dataset_dir) / f"{n}.hdf5").exists()
+    )
+    payload = json.dumps([CACHE_FORMAT, task_name, split, bands, names, total])
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def load_cache(task_name: str, split: str, ds: Any, bands: list[str]) -> tuple | None:
+    """Memory-mapped (x, y) if a valid cache exists for this split, else None."""
+    if split not in CACHE_SPLITS:
+        return None
+    folder = cache_root() / task_name
+    meta_path = folder / f"{split}_meta.json"
+    if not meta_path.exists():
+        return None
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        if meta.get("format") != CACHE_FORMAT or meta.get("bands") != bands:
+            return None
+        if meta.get("fingerprint") != split_fingerprint(task_name, split, ds, bands):
+            return None
+        x = np.load(folder / f"{split}_x.npy", mmap_mode="r")
+        y = np.load(folder / f"{split}_y.npy", mmap_mode="r")
+    except (OSError, ValueError):
+        return None
+    if len(x) != len(ds) or len(y) != len(ds):
+        return None
+    return x, y
+
+
+def cache_bytes(n: int, image_hwc: tuple, label_shape: tuple, label_itemsize: int) -> int:
+    """Disk size of one cached split: float32 images + labels."""
+    return int(n * (np.prod(image_hwc) * 4 + np.prod(label_shape or (1,)) * label_itemsize))
+
+
+def _label_store_dtype(kind: str, label: Any) -> Any:
+    if kind == "segmentation":
+        return np.int16 if np.asarray(label).max(initial=0) < 32767 else np.int32
+    return np.float32 if kind == "multilabel" else np.int64
+
+
+def build_split_cache(
+    task_name: str, split: str, data_dir: str | Path | None = None, progress: Any = None
+) -> dict:
+    """Write <cache>/<task>/<split>_{x,y}.npy + meta (atomically). TRAIN/VAL only."""
+    if split not in CACHE_SPLITS:
+        raise PermissionError(f"only {CACHE_SPLITS} are cached; refusing split={split!r}")
+    task = load_task(task_name, data_dir)
+    ds = open_split(task, split)
+    kind = task_type(task)
+    first = ds[0]
+    arr0, raw_names, _ = sample_array(first)
+    bands = channel_names(task_name, raw_names)[0]
+    lab0 = np.asarray(label_value(first.label))
+    label_dtype = _label_store_dtype(kind, lab0)
+    folder = cache_root() / task_name
+    folder.mkdir(parents=True, exist_ok=True)
+    tmp_x, tmp_y = folder / f".{split}_x.tmp.npy", folder / f".{split}_y.tmp.npy"
+    x = np.lib.format.open_memmap(tmp_x, mode="w+", dtype=np.float32, shape=(len(ds), *arr0.shape))
+    y = np.lib.format.open_memmap(tmp_y, mode="w+", dtype=label_dtype, shape=(len(ds), *lab0.shape))
+    for i in range(len(ds)):
+        sample = first if i == 0 else ds[i]
+        x[i] = sample_array(sample)[0]
+        y[i] = np.asarray(label_value(sample.label))
+        if progress and (i + 1) % 500 == 0:
+            progress(i + 1, len(ds))
+    x.flush()
+    y.flush()
+    del x, y
+    meta = {
+        "format": CACHE_FORMAT,
+        "task": task_name,
+        "split": split,
+        "n": len(ds),
+        "bands": bands,
+        "image_shape_hwc": list(arr0.shape),
+        "source_dtype": str(arr0.dtype),
+        "label_dtype": np.dtype(label_dtype).name,
+        "fingerprint": split_fingerprint(task_name, split, ds, bands),
+        "bytes": (tmp_x.stat().st_size + tmp_y.stat().st_size),
+    }
+    tmp_x.replace(folder / f"{split}_x.npy")
+    tmp_y.replace(folder / f"{split}_y.npy")
+    (folder / f"{split}_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    return meta
+
+
+# ---------------------------------------------------------------------------------------------
 # 3. PyTorch dataset
 # ---------------------------------------------------------------------------------------------
 Norm = Literal["zscore", "div10000", "none"] | tuple[Sequence[float], Sequence[float]]
@@ -831,6 +943,8 @@ class GeoBenchDataset:
 
     bands: "all" or band names (true names, errata applied), in the order the model wants.
     zero_fill: band names in `bands` that this task lacks; fed as all-zero channels.
+    use_cache: read the split from the on-disk .npy cache (scripts/build_cache.py) when one
+           exists and still matches the source files; never for the test split.
     norm:  "zscore"   (x - mean) / std with stats/<task>.json (TRAIN-only stats)
            "div10000" x / 10000, Sentinel-2 reflectance scale (what SSL4EO weights expect)
            "none"     raw values as float32
@@ -848,6 +962,7 @@ class GeoBenchDataset:
         allow_test: bool = False,
         cache: bool = False,
         zero_fill: Sequence[str] = (),
+        use_cache: bool = True,
     ) -> None:
         self.task_name = task_name
         self.split = split
@@ -870,6 +985,10 @@ class GeoBenchDataset:
         self.mean, self.std = self._norm_params(norm)
         self.indices = list(indices) if indices is not None else list(range(len(self.ds)))
         self._cache: dict[int, tuple[np.ndarray, Any]] | None = {} if cache else None
+        # on-disk .npy cache (train/val only; load_cache returns None for the test split)
+        self.disk_cache = (
+            load_cache(task_name, split, self.ds, self.all_bands) if use_cache else None
+        )
 
     def _norm_params(self, norm: Norm) -> tuple[np.ndarray, np.ndarray]:
         n = len(self.bands)
@@ -907,6 +1026,10 @@ class GeoBenchDataset:
     def raw(self, i: int) -> tuple[np.ndarray, Any]:
         """(H, W, C) array with ALL bands in true order (unnormalised) and the raw label."""
         idx = self.indices[i]
+        if self.disk_cache is not None:
+            x, y = self.disk_cache
+            label = np.asarray(y[idx])
+            return np.asarray(x[idx]), (label.item() if label.ndim == 0 else label)
         if self._cache is not None and idx in self._cache:
             return self._cache[idx]
         sample = self.ds[idx]

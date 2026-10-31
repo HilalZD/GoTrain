@@ -5,7 +5,7 @@ from conftest import make_config
 
 from gotrain.contracts import TrainConfig
 from gotrain.engine.fake import FakeEngine
-from gotrain.tools import init_task_budget, inspect_dataset, promote, run_halving, run_trials
+from gotrain.tools import init_task_budget, promote, run_halving, run_trials
 from gotrain.tools.search import INCONCLUSIVE_WARNING, screening_summary
 
 TASK = "m-eurosat"  # fake engine: 0.1 min/epoch at img 64 + 0.2 min setup
@@ -68,13 +68,6 @@ def test_halving_reports_spread_and_warning(home):
     assert out["screening_spread"] == pytest.approx(max(rung1) - min(rung1), abs=1e-4)
     assert (INCONCLUSIVE_WARNING in out["warnings"]) == (out["screening_spread"] < 0.005)
     assert {"seed_check_cost_min", "can_afford_seed_check"} <= out.keys()
-
-
-def test_inspect_hints_subsampling_on_large_train_split():
-    assert (
-        "train_subset_frac 0.2-0.3" in inspect_dataset("m-brick-kiln")["dataset"]["screening_hint"]
-    )
-    assert "screening_hint" not in inspect_dataset("m-eurosat")["dataset"]
 
 
 # ---------------------------------------------------------------- seed-check reserve

@@ -16,6 +16,7 @@ from PIL import Image, ImageDraw
 
 from gotrain.contracts import DatasetCard, EpochRecord, TrainConfig, TrainResult
 from gotrain.engine.combos import check_combo
+from gotrain.engine.throughput import PIXELS_PER_MINUTE, estimate_minutes_per_epoch
 
 S2_BANDS = [
     "B01",
@@ -212,9 +213,18 @@ def target_score(config: TrainConfig, card: DatasetCard, rng: random.Random) -> 
 
 
 def minutes_per_epoch(config: TrainConfig, card: DatasetCard) -> float:
-    """Epoch time scales with the samples seen, so a 0.25 subsample fits ~4x the epochs."""
-    pixels = (config.img_size / 64) ** 2
-    return card.split_sizes["train"] * config.train_subset_frac * pixels / 20000
+    """The shared throughput model: epoch time scales with pixels seen (a 0.25 subsample
+    fits ~4x the epochs)."""
+    side = config.img_size
+    return estimate_minutes_per_epoch(
+        card.split_sizes["train"], side, side, config.train_subset_frac
+    )
+
+
+TIMING_NOTE = (
+    "Fake engine timing: one epoch takes train_samples x train_subset_frac x img_size^2 / "
+    f"{PIXELS_PER_MINUTE / 1e6:.2f}M pixels per minute, plus {SETUP_MINUTES} min setup per trial."
+)
 
 
 def _clip(x: float) -> float:
@@ -420,7 +430,8 @@ class FakeEngine:
     def describe_dataset(self, task: str) -> DatasetCard:
         if task not in CARDS:
             raise ValueError(f"unknown task {task!r}; known: {sorted(CARDS)}")
-        return CARDS[task].model_copy(deep=True)
+        card = CARDS[task]
+        return card.model_copy(update={"notes": f"{card.notes} {TIMING_NOTE}"}, deep=True)
 
     def diagnose(self, task: str, run_dir: Path) -> dict:
         path = Path(run_dir) / "checkpoints" / "best.ckpt"

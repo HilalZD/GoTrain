@@ -22,6 +22,10 @@ VERDICT_HINTS = {
     "fine": "Curve looks healthy: gains now come from weights, augmentation or loss choice.",
 }
 MODEL_GRID_NAME = "diagnostics/error_grid_for_model.png"
+# After a diagnose, the tune agent must write both markers before any other tool call
+# (enforced by gotrain.agent.ObservationGate).
+OBSERVATION_MARKERS = ("VISUAL OBSERVATION", "HYPOTHESIS")
+OBSERVATION_REMINDER = "Next: write VISUAL OBSERVATION and HYPOTHESIS before any other tool call."
 
 
 def top_confusions(class_names: list[str], matrix: list[list[float]]) -> list[dict]:
@@ -96,6 +100,8 @@ def diagnose(run_id: str) -> dict:
 def diagnose_for_model(run_id: str) -> dict:
     """`diagnose` as a Strands tool result: the JSON summary, plus the error grid as a PNG."""
     out = diagnose(run_id)
+    if "error" not in out:
+        out["next_step"] = OBSERVATION_REMINDER  # last key: the end of the text result
     grid = out.get("error_grid")
     png = None
     if grid:

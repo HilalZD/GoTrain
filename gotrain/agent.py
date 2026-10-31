@@ -15,11 +15,18 @@ from botocore.config import Config as BotoConfig
 from strands import Agent, ModelRetryStrategy
 from strands import tool as strands_tool
 from strands.agent.conversation_manager import SlidingWindowConversationManager
-from strands.hooks import AfterToolsEvent, BeforeToolCallEvent, HookProvider, HookRegistry
+from strands.hooks import (
+    AfterToolCallEvent,
+    AfterToolsEvent,
+    BeforeToolCallEvent,
+    HookProvider,
+    HookRegistry,
+    MessageAddedEvent,
+)
 from strands.models import BedrockModel, Model
 from strands.tools.executors import SequentialToolExecutor
 
-from gotrain.audit import AuditLog
+from gotrain.audit import AuditLog, result_error, result_text
 from gotrain.config import Settings, get_settings
 from gotrain.contracts import TrainConfig
 from gotrain.tools import (
@@ -35,7 +42,7 @@ from gotrain.tools import (
     run_trials,
     write_lesson,
 )
-from gotrain.tools.diagnose import diagnose_for_model
+from gotrain.tools.diagnose import OBSERVATION_MARKERS, diagnose_for_model
 from gotrain.tools.registry import list_versions, load_version
 from gotrain.tools.trials import budget_status
 
@@ -100,6 +107,59 @@ class ToolCallLimit(HookProvider):
             event.end_turn = f"Stopped: tool-call limit ({self.hard_limit}) reached."
 
 
+class ObservationGate(HookProvider):
+    """After a successful diagnose, cancel every tool call until the agent has written an
+    assistant message containing both "VISUAL OBSERVATION" and "HYPOTHESIS".
+
+    Writing them in the same message as the next tool call counts: Strands adds the
+    assistant message before running its tools. Every block is an audit event.
+    """
+
+    def __init__(self, audit: AuditLog):
+        self.audit = audit
+        self.pending_run: str | None = None  # the diagnosed run awaiting an observation
+
+    def register_hooks(self, registry: HookRegistry, **kwargs: Any) -> None:
+        registry.add_callback(AfterToolCallEvent, self._after_tool)
+        registry.add_callback(MessageAddedEvent, self._message_added)
+        registry.add_callback(BeforeToolCallEvent, self._before_tool)
+
+    def _after_tool(self, event: AfterToolCallEvent) -> None:
+        if event.tool_use["name"] != "diagnose" or event.cancel_message:
+            return
+        result = event.result
+        if result.get("status") == "success" and not result_error(result, result_text(result)):
+            self.pending_run = event.tool_use.get("input", {}).get("run_id", "?")
+
+    def _message_added(self, event: MessageAddedEvent) -> None:
+        message = event.message
+        if self.pending_run is None or message.get("role") != "assistant":
+            return
+        text = "\n".join(block.get("text", "") for block in message.get("content", [])).upper()
+        if all(marker in text for marker in OBSERVATION_MARKERS):
+            self.audit.log("observation_written", diagnosed_run=self.pending_run)
+            self.pending_run = None
+
+    def _before_tool(self, event: BeforeToolCallEvent) -> None:
+        if self.pending_run is None:
+            return
+        name = event.tool_use["name"]
+        event.cancel_tool = (
+            f"Blocked: you diagnosed {self.pending_run} but have not written your observation. "
+            "Before any other tool call, write a message containing:\n"
+            "VISUAL OBSERVATION: what the worst predictions have in common (from the error "
+            "grid, or from the per-class scores and confusions if no image was shown).\n"
+            "HYPOTHESIS: the fix that observation suggests.\n"
+            f"Then call {name} again; the next config's reason must cite them."
+        )
+        self.audit.log(
+            "observation_enforced",
+            blocked_tool=name,
+            tool_use_id=event.tool_use["toolUseId"],
+            diagnosed_run=self.pending_run,
+        )
+
+
 def load_prompt(phase: Phase) -> str:
     return (PROMPTS_DIR / f"{phase}.md").read_text(encoding="utf-8")
 
@@ -160,11 +220,15 @@ def build_agent(
     if phase not in PHASE_TOOLS:
         raise ValueError(f"phase must be one of {sorted(PHASE_TOOLS)}, got {phase!r}")
     limit = ToolCallLimit(max_tool_calls or DEFAULT_MAX_TOOL_CALLS[phase], WRAP_UP_TOOLS[phase])
+    audit = audit or AuditLog(task, phase)
+    hooks: list[HookProvider] = [audit, limit]
+    if phase == "tune":  # diagnose only exists in tune
+        hooks.append(ObservationGate(audit))
     return Agent(
         model=model or build_model(get_settings()),
         tools=[to_strands_tool(fn) for fn in PHASE_TOOLS[phase]],
         system_prompt=load_prompt(phase),
-        hooks=[audit or AuditLog(task, phase), limit],
+        hooks=hooks,
         conversation_manager=SlidingWindowConversationManager(window_size=WINDOW_SIZE, pin_first=1),
         tool_executor=SequentialToolExecutor(),  # never two trainings on one GPU at once
         retry_strategy=ModelRetryStrategy(max_attempts=8, initial_delay=4, max_delay=120),

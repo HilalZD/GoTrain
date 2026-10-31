@@ -22,16 +22,21 @@ def recon(task: str) -> dict:
 
 
 def have_task(task: str) -> bool:
+    """True only if geobench is importable AND the task is on disk (else data tests skip)."""
     try:
+        import geobench  # noqa: F401
+
         data.find_task_dir(task)
         return True
-    except FileNotFoundError:
+    except (ImportError, FileNotFoundError):
         return False
 
 
-needs_eurosat = pytest.mark.skipif(not have_task("m-eurosat"), reason="m-eurosat not downloaded")
+needs_eurosat = pytest.mark.skipif(
+    not have_task("m-eurosat"), reason="needs geobench + m-eurosat on disk"
+)
 needs_pv4ger = pytest.mark.skipif(
-    not have_task("m-pv4ger-seg"), reason="m-pv4ger-seg not downloaded"
+    not have_task("m-pv4ger-seg"), reason="needs geobench + m-pv4ger-seg on disk"
 )
 
 

@@ -111,9 +111,10 @@ def find_task_dir(task_name: str, data_dir: str | Path | None = None) -> Path:
 
 
 def load_task(task_name: str, data_dir: str | Path | None = None) -> Any:
+    task_dir = find_task_dir(task_name, data_dir)  # a clear FileNotFoundError first
     import geobench
 
-    return geobench.load_task_specs(find_task_dir(task_name, data_dir))
+    return geobench.load_task_specs(task_dir)
 
 
 def open_split(task: Any, split: str, *, allow_test: bool = False) -> Any:

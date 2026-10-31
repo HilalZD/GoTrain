@@ -28,10 +28,13 @@ def repo_stats(monkeypatch):
 
 
 def have(task: str) -> bool:
+    """True only if geobench is importable AND the task is on disk (else data tests skip)."""
     try:
+        import geobench  # noqa: F401
+
         data.find_task_dir(task)
         return True
-    except FileNotFoundError:
+    except (ImportError, FileNotFoundError):
         return False
 
 
@@ -108,7 +111,7 @@ def _same_keys_as_fake(out: dict, tmp_path: Path, task: str) -> None:
     assert set(out) == set(fake.diagnose(task, run))
 
 
-@pytest.mark.skipif(not have("m-eurosat"), reason="m-eurosat not downloaded")
+@pytest.mark.skipif(not have("m-eurosat"), reason="needs geobench + m-eurosat on disk")
 def test_diagnose_eurosat_run(tmp_path):
     run = tmp_path / "m-eurosat-diag-0001"
     config = TrainConfig(
@@ -135,7 +138,7 @@ def test_diagnose_eurosat_run(tmp_path):
     assert summary["per_class_metric"] == "recall"
 
 
-@pytest.mark.skipif(not have("m-pv4ger-seg"), reason="m-pv4ger-seg not downloaded")
+@pytest.mark.skipif(not have("m-pv4ger-seg"), reason="needs geobench + m-pv4ger-seg on disk")
 def test_diagnose_pv4ger_run(tmp_path):
     run = tmp_path / "m-pv4ger-seg-diag-0001"
     config = TrainConfig(

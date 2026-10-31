@@ -44,10 +44,13 @@ def cfg(task="m-eurosat", **kw) -> TrainConfig:
 
 
 def have(task: str) -> bool:
+    """True only if geobench is importable AND the task is on disk (else data tests skip)."""
     try:
+        import geobench  # noqa: F401
+
         data.find_task_dir(task)
         return True
-    except FileNotFoundError:
+    except (ImportError, FileNotFoundError):
         return False
 
 
@@ -247,7 +250,7 @@ def test_ssl4eo_model_loads_all_13_pretrained_filters():
     assert set(std.tolist()) == {10000.0} and set(mean.tolist()) == {0.0}
 
 
-@pytest.mark.skipif(not have("m-eurosat"), reason="m-eurosat not downloaded")
+@pytest.mark.skipif(not have("m-eurosat"), reason="needs geobench + m-eurosat on disk")
 def test_zero_filled_channels_are_zero():
     ds = data.GeoBenchDataset(
         "m-eurosat",
@@ -279,7 +282,7 @@ def test_evaluate_rejects_unknown_split(tmp_path):
 
 
 # ------------------------------------------------------------------ end to end (needs data)
-@pytest.mark.skipif(not have("m-eurosat"), reason="m-eurosat not downloaded")
+@pytest.mark.skipif(not have("m-eurosat"), reason="needs geobench + m-eurosat on disk")
 def test_eurosat_trial_end_to_end(tmp_path):
     run = tmp_path / "m-eurosat-test-0001"
     config = cfg(train_subset_frac=0.05, augment=["flip", "rot90"], max_epochs=2)
@@ -301,14 +304,14 @@ def test_eurosat_trial_end_to_end(tmp_path):
     assert tta["tta"] is True and 0.0 <= tta["score"] <= 1.0
 
 
-@pytest.mark.skipif(not have("m-eurosat"), reason="m-eurosat not downloaded")
+@pytest.mark.skipif(not have("m-eurosat"), reason="needs geobench + m-eurosat on disk")
 def test_tiny_budget_times_out_cleanly(tmp_path):
     result = engine.train(cfg(), budget_minutes=0.001, run_dir=tmp_path / "run-tiny")
     assert result.status == "timeout" and result.checkpoint_path is None
     assert result.history == []  # tools/trials.py fails fast on 0-epoch timeouts
 
 
-@pytest.mark.skipif(not have("m-eurosat"), reason="m-eurosat not downloaded")
+@pytest.mark.skipif(not have("m-eurosat"), reason="needs geobench + m-eurosat on disk")
 def test_slow_first_batch_does_not_end_the_trial(tmp_path, monkeypatch):
     """Regression (SageMaker): warm-up in the first batch inflated the val reserve past the
     budget, so a 3-minute trial stopped after ~10 s with 0 epochs."""
@@ -329,7 +332,7 @@ def test_slow_first_batch_does_not_end_the_trial(tmp_path, monkeypatch):
     assert metrics["full_epochs"] >= 1 and metrics["n_val"] == 1000
 
 
-@pytest.mark.skipif(not have("m-pv4ger-seg"), reason="m-pv4ger-seg not downloaded")
+@pytest.mark.skipif(not have("m-pv4ger-seg"), reason="needs geobench + m-pv4ger-seg on disk")
 def test_pv4ger_segmentation_trial_end_to_end(tmp_path):
     run = tmp_path / "m-pv4ger-seg-test-0001"
     config = cfg("m-pv4ger-seg", loss="dice_bce", train_subset_frac=0.05, max_epochs=1)

@@ -1,0 +1,651 @@
+"""Config-driven training engine: train(), evaluate() (and diagnose(), re-exported).
+
+train(config, budget_minutes, run_dir) -> TrainResult, scored on VALIDATION.
+
+How one trial runs:
+1. Check the config against the task's DatasetCard (loss fits the task type, bands exist,
+   backbone/weights combination is buildable, U-Net input size divisible by 32). A bad config
+   returns status "error" with a hint, before any heavy work.
+2. Build the datasets (train subset via train_subset_frac; the FULL, fixed val set) and the
+   model (gotrain/engine/models.py).
+3. Train with AdamW. The learning rate follows a warm-up + cosine curve whose progress is
+   max(time used / time available, steps done / max_epochs steps): the schedule always
+   finishes, whether the budget or max_epochs runs out first. Time for the last validation
+   and checkpoint is reserved, so the run stops cleanly inside its budget.
+4. Validate after every epoch on the full val set; keep the best checkpoint.
+5. Write run_dir/{history.json, metrics.json, checkpoints/best.ckpt, val_predictions.npz}
+   (+ config.json if the caller has not written one).
+
+Status: "ok" = at least one full epoch was trained and validated (stopping at the budget is
+the normal end of a time-budgeted trial); "timeout" = the budget ran out inside the first
+epoch (any checkpoint saved is still returned); "error" = anything else, with a message.
+train() never raises.
+
+Metrics: accuracy (classification), micro-F1 "f1" (multilabel), mIoU "miou" (segmentation).
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import random
+import time
+import traceback
+from dataclasses import asdict
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+
+from gotrain.contracts import DatasetCard, EpochRecord, TrainConfig, TrainResult
+from gotrain.engine.data import (
+    IGNORE_INDEX,
+    TEST_SPLIT,
+    GeoBenchDataset,
+    describe_dataset,
+    subset_indices,
+)
+from gotrain.engine.interface import load_band_stats
+from gotrain.engine.models import UNET_STRIDE, ModelSpec, build_model, check_spec
+from gotrain.engine.models import input_normalisation as model_normalisation
+
+METRIC = {"classification": "accuracy", "multilabel": "f1", "segmentation": "miou"}
+LOSSES = {
+    "classification": ("ce", "focal", "bce"),
+    "multilabel": ("bce", "focal"),
+    "segmentation": ("ce", "dice_ce", "focal", "bce", "dice_bce"),
+}
+BINARY_SEG_LOSSES = ("bce", "dice_bce")  # one logit per pixel; needs exactly 2 classes
+WARMUP_FRACTION = 0.05
+SAVE_MARGIN_S = 3.0
+CKPT_NAME = "checkpoints/best.ckpt"
+
+
+# ---------------------------------------------------------------------------------------------
+# Config checks (cheap, before any data or model is loaded)
+# ---------------------------------------------------------------------------------------------
+def selected_bands(config: TrainConfig, card: DatasetCard) -> list[str]:
+    return list(card.bands) if config.bands == "all" else list(config.bands)
+
+
+def n_outputs(card: DatasetCard, loss: str) -> int:
+    if card.task_type == "segmentation" and loss in BINARY_SEG_LOSSES:
+        return 1
+    return card.n_classes
+
+
+def config_problem(config: TrainConfig, card: DatasetCard) -> str | None:
+    """Why this config can't run on this task (a hint the agent can act on), or None."""
+    allowed = LOSSES[card.task_type]
+    if config.loss not in allowed:
+        return f"loss {config.loss!r} does not fit a {card.task_type} task; use one of {allowed}"
+    if card.task_type == "segmentation" and config.loss in BINARY_SEG_LOSSES:
+        if card.n_classes != 2:
+            return (
+                f"loss {config.loss!r} is for binary masks but {card.task} has "
+                f"{card.n_classes} classes; use 'dice_ce', 'ce' or 'focal'"
+            )
+    if config.bands != "all":
+        unknown = [b for b in config.bands if b not in card.bands]
+        if unknown:
+            return f"bands {unknown} not in {card.task}; available: {card.bands}"
+    if card.task_type == "segmentation" and config.img_size % UNET_STRIDE:
+        return f"segmentation img_size must be a multiple of {UNET_STRIDE}, got {config.img_size}"
+    return check_spec(model_spec(config, card, mean=[], std=[]))
+
+
+def model_spec(config: TrainConfig, card: DatasetCard, mean: list, std: list) -> ModelSpec:
+    return ModelSpec(
+        task_type=card.task_type,
+        backbone=config.backbone,
+        weights=config.weights,
+        bands=selected_bands(config, card),
+        n_outputs=n_outputs(card, config.loss),
+        band_mean=mean,
+        band_std=std,
+    )
+
+
+# ---------------------------------------------------------------------------------------------
+# Losses
+# ---------------------------------------------------------------------------------------------
+def _soft_dice(probs: Any, onehot: Any, valid: Any, eps: float = 1.0) -> Any:
+    """1 - mean Dice over classes. probs/onehot: [B, C, H, W]; valid: [B, 1, H, W]."""
+    p, t = probs * valid, onehot * valid
+    inter = (p * t).sum(dim=(0, 2, 3))
+    denom = p.sum(dim=(0, 2, 3)) + t.sum(dim=(0, 2, 3))
+    return 1 - ((2 * inter + eps) / (denom + eps)).mean()
+
+
+def compute_loss(name: str, task_type: str, logits: Any, y: Any, n_classes: int) -> Any:
+    import torch
+    import torch.nn.functional as F
+    from torchvision.ops import sigmoid_focal_loss
+
+    logits = logits.float()
+    if task_type == "multilabel":
+        if name == "focal":
+            return sigmoid_focal_loss(logits, y, reduction="mean")
+        return F.binary_cross_entropy_with_logits(logits, y)
+    if task_type == "classification":
+        if name == "bce":
+            return F.binary_cross_entropy_with_logits(logits, F.one_hot(y, n_classes).float())
+        ce = F.cross_entropy(logits, y, reduction="none")
+        if name == "focal":
+            return ((1 - torch.exp(-ce)) ** 2 * ce).mean()
+        return ce.mean()
+    # segmentation; y: [B, H, W] with IGNORE_INDEX on pixels to skip
+    valid = y != IGNORE_INDEX
+    if logits.shape[1] == 1:  # binary: bce / dice_bce
+        t = y.clamp(min=0).float().unsqueeze(1)
+        v = valid.unsqueeze(1).float()
+        bce = (F.binary_cross_entropy_with_logits(logits, t, reduction="none") * v).sum()
+        bce = bce / v.sum().clamp(min=1)
+        if name == "bce":
+            return bce
+        return bce + _soft_dice(torch.sigmoid(logits), t, v)
+    ce = F.cross_entropy(logits, y, ignore_index=IGNORE_INDEX, reduction="none")
+    if name == "focal":
+        return ((1 - torch.exp(-ce)) ** 2 * ce)[valid].mean()
+    ce_mean = ce[valid].mean() if valid.any() else ce.sum() * 0
+    if name == "ce":
+        return ce_mean
+    onehot = F.one_hot(y.clamp(min=0), n_classes).permute(0, 3, 1, 2).float()
+    return ce_mean + _soft_dice(logits.softmax(1), onehot, valid.unsqueeze(1).float())
+
+
+# ---------------------------------------------------------------------------------------------
+# Batch transforms (on the device)
+# ---------------------------------------------------------------------------------------------
+def resize(x: Any, size: int) -> Any:
+    import torch.nn.functional as F
+
+    if x.shape[-1] == size and x.shape[-2] == size:
+        return x
+    return F.interpolate(x, size=(size, size), mode="bilinear", align_corners=False)
+
+
+def resize_mask(y: Any, size: int) -> Any:
+    import torch.nn.functional as F
+
+    if y.shape[-1] == size and y.shape[-2] == size:
+        return y
+    return F.interpolate(y[:, None].float(), size=(size, size), mode="nearest")[:, 0].long()
+
+
+def augment(x: Any, y: Any, ops: list[str], segmentation: bool) -> tuple[Any, Any]:
+    """Per-sample flips / rot90 (applied to masks too) and brightness/contrast jitter."""
+    import torch
+
+    if not ops:
+        return x, y
+    xs, ys = [], []
+    square = x.shape[-1] == x.shape[-2]
+    for xi, yi in zip(x, y, strict=True):
+        if "flip" in ops:
+            if torch.rand(()) < 0.5:
+                xi = xi.flip(-1)
+                yi = yi.flip(-1) if segmentation else yi
+            if torch.rand(()) < 0.5:
+                xi = xi.flip(-2)
+                yi = yi.flip(-2) if segmentation else yi
+        if "rot90" in ops and square:
+            k = int(torch.randint(4, ()))
+            xi = torch.rot90(xi, k, dims=(-2, -1))
+            yi = torch.rot90(yi, k, dims=(-2, -1)) if segmentation else yi
+        if "color_jitter" in ops:  # inputs are normalised, so jitter in normalised units
+            xi = xi * (0.9 + 0.2 * torch.rand(())) + (torch.rand(()) - 0.5) * 0.2
+        xs.append(xi)
+        ys.append(yi)
+    return torch.stack(xs), torch.stack(ys)
+
+
+# ---------------------------------------------------------------------------------------------
+# Inference and metrics (shared by validation, evaluate() and diagnose())
+# ---------------------------------------------------------------------------------------------
+def _tta_views(x: Any) -> list[tuple[Any, Any]]:
+    """(view, undo) pairs: 4 rotations x {no flip, horizontal flip} = the 8 dihedral views."""
+    import torch
+
+    views = []
+    for k in range(4):
+        for flip in (False, True):
+
+            def fwd(t, k=k, flip=flip):
+                t = t.flip(-1) if flip else t
+                return torch.rot90(t, k, dims=(-2, -1))
+
+            def back(t, k=k, flip=flip):
+                t = torch.rot90(t, -k, dims=(-2, -1))
+                return t.flip(-1) if flip else t
+
+            views.append((fwd, back))
+    return views
+
+
+def forward(model: Any, x: Any, img_size: int, segmentation: bool, tta: bool) -> Any:
+    """Logits at the input's native size (segmentation) or per sample (classification)."""
+    import torch
+
+    native = x.shape[-2:]
+    views = _tta_views(x) if tta and x.shape[-1] == x.shape[-2] else [(None, None)]
+    total = None
+    for fwd, back in views:
+        xv = fwd(x) if fwd else x
+        with torch.autocast(x.device.type, enabled=x.device.type == "cuda"):
+            out = model(resize(xv, img_size)).float()
+        if segmentation:
+            if out.shape[-2:] != native:
+                out = torch.nn.functional.interpolate(
+                    out, size=native, mode="bilinear", align_corners=False
+                )
+            out = back(out) if back else out
+        total = out if total is None else total + out
+    return total / len(views)
+
+
+def run_inference(
+    model: Any,
+    loader: Any,
+    task_type: str,
+    n_classes: int,
+    img_size: int,
+    device: Any,
+    tta: bool = False,
+) -> dict:
+    """Predictions over a whole loader, as numpy arrays.
+
+    classification: y_true [N], y_pred [N], probs [N, C]
+    multilabel:     y_true [N, C], probs [N, C]
+    segmentation:   confusion [C, C] pixel counts (rows = true), pred_masks [N, H, W] uint8,
+                    image_score [N] (mean IoU over classes present in that image)
+    """
+    import torch
+
+    model.eval()
+    seg = task_type == "segmentation"
+    out: dict[str, list] = {"y_true": [], "y_pred": [], "probs": [], "image_score": []}
+    confusion = np.zeros((n_classes, n_classes), dtype=np.int64)
+    with torch.no_grad():
+        for x, y in loader:
+            x = x.to(device, non_blocking=True)
+            logits = forward(model, x, img_size, seg, tta)
+            if task_type == "classification":
+                probs = logits.softmax(1).cpu().numpy()
+                out["probs"].append(probs)
+                out["y_pred"].append(probs.argmax(1))
+                out["y_true"].append(y.numpy())
+            elif task_type == "multilabel":
+                out["probs"].append(torch.sigmoid(logits).cpu().numpy())
+                out["y_true"].append(y.numpy())
+            else:
+                pred = (logits[:, 0] > 0).long() if logits.shape[1] == 1 else logits.argmax(1)
+                pred, yt = pred.cpu().numpy(), y.numpy()
+                for p_img, t_img in zip(pred, yt, strict=True):
+                    valid = t_img != IGNORE_INDEX
+                    cm = np.bincount(
+                        n_classes * t_img[valid] + p_img[valid], minlength=n_classes**2
+                    ).reshape(n_classes, n_classes)
+                    confusion += cm
+                    out["image_score"].append(miou_from_confusion(cm))
+                out["y_pred"].append(pred.astype(np.uint8))
+    if seg:
+        return {
+            "confusion": confusion,
+            "pred_masks": np.concatenate(out["y_pred"]) if out["y_pred"] else np.zeros(0),
+            "image_score": np.asarray(out["image_score"], dtype=np.float32),
+        }
+    res = {"y_true": np.concatenate(out["y_true"]), "probs": np.concatenate(out["probs"])}
+    if task_type == "classification":
+        res["y_pred"] = np.concatenate(out["y_pred"])
+    return res
+
+
+def iou_per_class(confusion: np.ndarray) -> np.ndarray:
+    """IoU per class; NaN where the class is absent from both truth and prediction."""
+    tp = np.diag(confusion).astype(np.float64)
+    union = confusion.sum(0) + confusion.sum(1) - tp
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.where(union > 0, tp / union, np.nan)
+
+
+def miou_from_confusion(confusion: np.ndarray) -> float:
+    iou = iou_per_class(confusion)
+    return float(np.nanmean(iou)) if np.isfinite(iou).any() else 0.0
+
+
+def micro_f1(y_true: np.ndarray, probs: np.ndarray, threshold: float = 0.5) -> float:
+    pred = probs > threshold
+    true = y_true > 0.5
+    tp = np.sum(pred & true)
+    fp = np.sum(pred & ~true)
+    fn = np.sum(~pred & true)
+    return float(2 * tp / max(2 * tp + fp + fn, 1))
+
+
+def score(task_type: str, preds: dict) -> float:
+    if task_type == "classification":
+        return float(np.mean(preds["y_pred"] == preds["y_true"]))
+    if task_type == "multilabel":
+        return micro_f1(preds["y_true"], preds["probs"])
+    return miou_from_confusion(preds["confusion"])
+
+
+# ---------------------------------------------------------------------------------------------
+# Checkpoints
+# ---------------------------------------------------------------------------------------------
+def save_checkpoint(
+    path: Path,
+    model: Any,
+    config: TrainConfig,
+    card: DatasetCard,
+    spec: ModelSpec,
+    norm: tuple,
+    val_score: float,
+    epoch: int,
+) -> None:
+    import torch
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "format": 1,
+        "task": card.task,
+        "task_type": card.task_type,
+        "n_classes": card.n_classes,
+        "class_names": list(card.class_names),
+        "metric_name": METRIC[card.task_type],
+        "config": config.model_dump(mode="json"),
+        "spec": asdict(spec),
+        "norm_mean": [float(v) for v in norm[0]],
+        "norm_std": [float(v) for v in norm[1]],
+        "val_score": float(val_score),
+        "epoch": epoch,
+        "model": {k: v.detach().cpu() for k, v in model.state_dict().items()},
+    }
+    tmp = path.with_suffix(".tmp")
+    torch.save(payload, tmp)
+    tmp.replace(path)
+
+
+def load_checkpoint(path: Path, device: Any) -> tuple[dict, Any]:
+    """(checkpoint dict, model with its weights) without downloading pretrained weights."""
+    import torch
+
+    ckpt = torch.load(Path(path), map_location="cpu", weights_only=True)
+    spec = ModelSpec(**{**ckpt["spec"], "weights": "none"})  # weights come from the file
+    model = build_model(spec)
+    model.load_state_dict(ckpt["model"])
+    return ckpt, model.to(device)
+
+
+def checkpoint_dataset(ckpt: dict, split: str, allow_test: bool = False) -> GeoBenchDataset:
+    return GeoBenchDataset(
+        ckpt["task"],
+        split,
+        bands=ckpt["spec"]["bands"],
+        norm=(ckpt["norm_mean"], ckpt["norm_std"]),
+        allow_test=allow_test,
+    )
+
+
+# ---------------------------------------------------------------------------------------------
+# Training loop
+# ---------------------------------------------------------------------------------------------
+def lr_factor(progress: float) -> float:
+    """Linear warm-up for the first 5% of progress, then cosine decay to 0 at progress 1."""
+    if progress < WARMUP_FRACTION:
+        return max(progress / WARMUP_FRACTION, 0.01)
+    p = (progress - WARMUP_FRACTION) / (1 - WARMUP_FRACTION)
+    return 0.5 * (1 + math.cos(math.pi * min(p, 1.0)))
+
+
+def _seed_everything(seed: int) -> None:
+    import torch
+
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+
+def _loaders(train_ds: Any, val_ds: Any, batch_size: int, device: Any) -> tuple[Any, Any]:
+    from torch.utils.data import DataLoader
+
+    workers = 4 if device.type == "cuda" else 0
+    pin = device.type == "cuda"
+    train_dl = DataLoader(
+        train_ds,
+        batch_size,
+        shuffle=True,
+        drop_last=len(train_ds) > batch_size,
+        num_workers=workers,
+        pin_memory=pin,
+        persistent_workers=workers > 0,
+    )
+    val_dl = DataLoader(val_ds, batch_size, num_workers=workers, pin_memory=pin)
+    return train_dl, val_dl
+
+
+def _write_json(path: Path, obj: Any) -> None:
+    path.write_text(json.dumps(obj, indent=2, default=str), encoding="utf-8")
+
+
+def _save_predictions(path: Path, preds: dict, sample_names: list[str]) -> None:
+    np.savez_compressed(path, sample_names=np.asarray(sample_names), **preds)
+
+
+def train(config: TrainConfig, budget_minutes: float, run_dir: Path) -> TrainResult:
+    """Contract entry point. Never raises: failures come back as status 'error'."""
+    t_start = time.monotonic()
+    run_dir = Path(run_dir)
+    metric = "unknown"
+    try:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        if not (run_dir / "config.json").exists():
+            (run_dir / "config.json").write_text(config.model_dump_json(indent=2), "utf-8")
+        card = describe_dataset(config.task)
+        metric = METRIC[card.task_type]
+        problem = config_problem(config, card)
+        if problem:
+            return _error(run_dir, config, metric, t_start, f"invalid config: {problem}")
+        return _train(config, card, budget_minutes, run_dir, t_start)
+    except Exception as exc:  # the caller must never crash because of a trial
+        msg = f"{type(exc).__name__}: {exc}"
+        if "out of memory" in str(exc).lower():
+            msg += " (hint: lower batch_size or img_size)"
+        (run_dir / "traceback.txt").write_text(traceback.format_exc(), encoding="utf-8")
+        return _error(run_dir, config, metric, t_start, msg)
+
+
+def _error(run_dir: Path, config: TrainConfig, metric: str, t_start: float, msg: str):
+    minutes = (time.monotonic() - t_start) / 60
+    _write_json(run_dir / "metrics.json", {"status": "error", "error": msg, "minutes": minutes})
+    return TrainResult(
+        run_id=run_dir.name,
+        task=config.task,
+        status="error",
+        metric_name=metric,
+        minutes_used=minutes,
+        error=msg,
+    )
+
+
+def _train(
+    config: TrainConfig, card: DatasetCard, budget_minutes: float, run_dir: Path, t_start: float
+) -> TrainResult:
+    import torch
+
+    _seed_everything(config.seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    torch.backends.cudnn.benchmark = device.type == "cuda"
+    deadline = t_start + budget_minutes * 60
+
+    # --- data and model ---
+    bands = selected_bands(config, card)
+    stats = load_band_stats(config.task)
+    mean = [stats.mean[stats.bands.index(b)] for b in bands]
+    std = [stats.std[stats.bands.index(b)] for b in bands]
+    spec = model_spec(config, card, mean, std)
+    norm = model_normalisation(spec)
+    train_idx = subset_indices(card.split_sizes["train"], config.train_subset_frac, config.seed)
+    train_ds = GeoBenchDataset(config.task, "train", bands=bands, norm=norm, indices=train_idx)
+    val_ds = GeoBenchDataset(config.task, "val", bands=bands, norm=norm)
+    train_dl, val_dl = _loaders(train_ds, val_ds, config.batch_size, device)
+    model = build_model(spec).to(device)
+    opt = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
+    scaler = torch.amp.GradScaler(enabled=device.type == "cuda")
+    seg = card.task_type == "segmentation"
+
+    # --- loop ---
+    max_steps = config.max_epochs * len(train_dl)
+    train_start = time.monotonic()
+    history: list[EpochRecord] = []
+    best = {"score": -1.0, "epoch": 0, "preds": None}
+    step, full_epochs, sec_per_sample, val_seconds = 0, 0, None, None
+    stop_reason = "max_epochs"
+
+    def reserve() -> float:  # seconds kept for the final validation + checkpoint
+        if val_seconds is not None:
+            return 1.3 * val_seconds + SAVE_MARGIN_S
+        if sec_per_sample is None:
+            return SAVE_MARGIN_S
+        return 0.5 * sec_per_sample * len(val_ds) + SAVE_MARGIN_S
+
+    def progress(now: float) -> float:
+        used = now - train_start
+        left = deadline - now - reserve()
+        time_p = used / max(used + left, 1e-9) if left > 0 else 1.0
+        return min(1.0, max(step / max(max_steps, 1), time_p))
+
+    for epoch in range(1, config.max_epochs + 1):
+        model.train()
+        losses, seen, epoch_t0, finished_epoch = [], 0, time.monotonic(), True
+        for x, y in train_dl:
+            now = time.monotonic()
+            if deadline - now - reserve() <= 0:
+                finished_epoch, stop_reason = False, "budget"
+                break
+            for group in opt.param_groups:
+                group["lr"] = config.lr * lr_factor(progress(now))
+            x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
+            x, y = augment(x, y, config.augment, seg)
+            x = resize(x, config.img_size)
+            if seg:
+                y = resize_mask(y, config.img_size)
+            with torch.autocast(device.type, enabled=device.type == "cuda"):
+                logits = model(x)
+            loss = compute_loss(config.loss, card.task_type, logits, y, card.n_classes)
+            if not torch.isfinite(loss):
+                raise FloatingPointError("loss became NaN/inf (hint: lower lr)")
+            opt.zero_grad(set_to_none=True)
+            scaler.scale(loss).backward()
+            scaler.step(opt)
+            scaler.update()
+            losses.append(loss.item())
+            seen += len(x)
+            step += 1
+            sec_per_sample = (time.monotonic() - epoch_t0) / seen
+        if not losses:  # no time left for even one batch of this epoch
+            break
+        full_epochs += finished_epoch
+
+        val_t0 = time.monotonic()
+        preds = run_inference(
+            model, val_dl, card.task_type, card.n_classes, config.img_size, device
+        )
+        val_score = score(card.task_type, preds)
+        val_seconds = time.monotonic() - val_t0
+        history.append(
+            EpochRecord(
+                epoch=epoch,
+                train_loss=round(float(np.mean(losses)), 5),
+                val_score=round(min(max(val_score, 0.0), 1.0), 5),
+                elapsed_s=round(time.monotonic() - t_start, 1),
+            )
+        )
+        if val_score > best["score"]:
+            best = {"score": val_score, "epoch": epoch, "preds": preds}
+            save_checkpoint(run_dir / CKPT_NAME, model, config, card, spec, norm, val_score, epoch)
+        _write_json(run_dir / "history.json", [h.model_dump() for h in history])
+        if not finished_epoch:
+            break  # stop_reason already "budget"
+        if progress(time.monotonic()) >= 1.0:
+            stop_reason = "max_epochs" if step >= max_steps else "budget"
+            break
+
+    # --- outputs ---
+    minutes = (time.monotonic() - t_start) / 60
+    has_ckpt = best["preds"] is not None
+    if has_ckpt:
+        names = [val_ds.sample_name(i) for i in range(len(val_ds))]
+        _save_predictions(run_dir / "val_predictions.npz", best["preds"], names)
+    status = "ok" if full_epochs >= 1 and has_ckpt else "timeout"
+    val_score = round(min(max(best["score"], 0.0), 1.0), 5) if has_ckpt else None
+    _write_json(
+        run_dir / "metrics.json",
+        {
+            "status": status,
+            "metric_name": METRIC[card.task_type],
+            "val_score": val_score,
+            "best_epoch": best["epoch"],
+            "epochs_run": len(history),
+            "full_epochs": full_epochs,
+            "stop_reason": stop_reason,
+            "minutes_used": round(minutes, 3),
+            "budget_minutes": budget_minutes,
+            "n_train": len(train_ds),
+            "n_val": len(val_ds),
+            "device": str(device),
+            "bands": bands,
+            "normalisation": {"mean": norm[0].tolist(), "std": norm[1].tolist()},
+        },
+    )
+    _write_json(run_dir / "history.json", [h.model_dump() for h in history])
+    return TrainResult(
+        run_id=run_dir.name,
+        task=config.task,
+        status=status,
+        metric_name=METRIC[card.task_type],
+        val_score=val_score,
+        history=history,
+        minutes_used=minutes,
+        checkpoint_path=(run_dir / CKPT_NAME) if has_ckpt else None,
+        error=None if status == "ok" else "budget ran out inside the first epoch",
+    )
+
+
+# ---------------------------------------------------------------------------------------------
+# evaluate()
+# ---------------------------------------------------------------------------------------------
+def evaluate(task: str, checkpoint_path: Path, split: str, tta: bool = False) -> dict:
+    """Score a checkpoint on 'val' or the test split (the latter only via tools/final_test.py).
+
+    tta=True averages predictions over the 8 flip/rot90 views (test-time augmentation).
+    """
+    import torch
+    from torch.utils.data import DataLoader
+
+    if split not in ("val", TEST_SPLIT):
+        raise ValueError(f"split must be 'val' or the test split, got {split!r}")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    ckpt, model = load_checkpoint(checkpoint_path, device)
+    if ckpt["task"] != task:
+        raise ValueError(f"checkpoint is for {ckpt['task']!r}, not {task!r}")
+    ds = checkpoint_dataset(ckpt, split, allow_test=split == TEST_SPLIT)
+    loader = DataLoader(ds, ckpt["config"]["batch_size"], num_workers=0)
+    preds = run_inference(
+        model,
+        loader,
+        ckpt["task_type"],
+        ckpt["n_classes"],
+        ckpt["config"]["img_size"],
+        device,
+        tta=tta,
+    )
+    return {
+        "task": task,
+        "split": split,
+        "metric_name": ckpt["metric_name"],
+        "score": round(min(max(score(ckpt["task_type"], preds), 0.0), 1.0), 5),
+        "n_samples": len(ds),
+        "tta": tta,
+    }

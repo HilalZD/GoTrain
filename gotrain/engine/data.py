@@ -607,7 +607,7 @@ def describe_dataset(task: str) -> DatasetCard:
 # ---------------------------------------------------------------------------------------------
 # 3. PyTorch dataset
 # ---------------------------------------------------------------------------------------------
-Norm = Literal["zscore", "div10000", "none"]
+Norm = Literal["zscore", "div10000", "none"] | tuple[Sequence[float], Sequence[float]]
 
 
 def subset_indices(n: int, frac: float, seed: int) -> list[int]:
@@ -628,6 +628,7 @@ class GeoBenchDataset:
     norm:  "zscore"   (x - mean) / std with stats/<task>.json (TRAIN-only stats)
            "div10000" x / 10000, Sentinel-2 reflectance scale (what SSL4EO weights expect)
            "none"     raw values as float32
+           (mean, std) explicit per-band arrays (models.input_normalisation, checkpoints)
     """
 
     def __init__(
@@ -661,6 +662,11 @@ class GeoBenchDataset:
 
     def _norm_params(self, norm: Norm) -> tuple[np.ndarray, np.ndarray]:
         n = len(self.bands)
+        if isinstance(norm, tuple):  # explicit per-band (mean, std), e.g. from a checkpoint
+            mean, std = (np.asarray(v, np.float32) for v in norm)
+            if mean.shape != (n,) or std.shape != (n,):
+                raise ValueError(f"norm arrays must have one value per band ({n})")
+            return mean, np.where(std < 1e-6, 1.0, std).astype(np.float32)
         if norm == "div10000":
             return np.zeros(n, np.float32), np.full(n, 10000.0, np.float32)
         if norm == "none":

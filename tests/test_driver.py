@@ -16,6 +16,7 @@ from gotrain.tools import (
     register_model,
     run_trials,
 )
+from gotrain.tools.memory import all_lessons
 
 TASK = "m-eurosat"  # fake: 0.1 min/epoch
 TRIAL = {"task": TASK, "configs": [make_config()], "budget_minutes_per_trial": 2.0}
@@ -197,3 +198,53 @@ def test_gate_message_says_same_response_and_do_not_end_turn():
     assert "AND include your next tool call in the SAME response" in blocked["error"]
     assert "do not end your turn" in blocked["error"]
     assert of(events, "observation_written")[0]["source"] == "message"
+
+
+# ---------------------------------------------------------------- lessons written during tune
+
+
+def tune_lessons() -> list[dict]:
+    return [x for x in all_lessons() if "source:tune" in x["tags"]]
+
+
+def test_agent_lessons_are_written_with_the_tune_tag():
+    reply = json.dumps(
+        [
+            {"lesson": "rot90 helped by 0.01 on val", "tags": ["rot90"]},
+            {"lesson": "lr 2e-3 was too high (val 0.80)", "tags": []},
+        ]
+    )
+    script = [
+        [("tool", "run_trials", TRIAL)],
+        lambda: [("tool", "register_model", {"run_id": best_run_id()})],
+        [("text", "Done.")],
+        [("text", f"Here you go: {reply}")],
+    ]
+    outcome, events, _ = session(script)
+    assert outcome["lessons_written"] == 2
+    assert len(tune_lessons()) == 2 and "rot90" in tune_lessons()[0]["tags"]
+    assert of(events, "session_lessons")[0]["source"] == "agent"
+
+
+def test_failed_lesson_request_falls_back_to_an_automatic_lesson():
+    script = [
+        [("tool", "run_trials", TRIAL)],
+        lambda: [("tool", "register_model", {"run_id": best_run_id()})],
+        [("text", "Done.")],
+        [("text", "I have no lessons in JSON form.")],
+    ]
+    outcome, events, _ = session(script)
+    assert outcome["lessons_written"] == 1
+    (lesson,) = tune_lessons()
+    assert "auto-written by harness" in lesson["lesson"] and "val accuracy" in lesson["lesson"]
+    assert of(events, "session_lessons")[0]["source"] == "automatic"
+
+
+def test_harness_registered_session_also_writes_lessons():
+    outcome, _, _ = session([[("tool", "run_trials", TRIAL)]], budget=3)
+    assert outcome["registered_by"] == "harness" and outcome["lessons_written"] == 1
+
+
+def test_finalise_writes_no_tune_lessons():
+    session([[("text", "Nothing to do.")]], phase="finalise")
+    assert tune_lessons() == []

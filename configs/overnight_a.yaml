@@ -1,0 +1,8 @@
+# Queue A: tune only. Launch: scripts/launch_overnight.sh configs/overnight_a.yaml
+queue:
+  - {task: m-eurosat, budget_min: 45, home: ~/gotrain_home, memory: shared}
+  - {task: m-brick-kiln, budget_min: 90, home: ~/gotrain_home, memory: shared}
+  - {task: m-brick-kiln, budget_min: 90, home: ~/gotrain_ablation, memory: empty}
+  # label-efficiency curve for eurosat: reuses the registered config (budget is only for the
+  # session itself; the retrains are outside it), so a short session is enough to re-register
+  - {task: m-eurosat, budget_min: 45, home: ~/gotrain_home, memory: shared, label_fracs: [0.05, 0.1, 0.25, 0.5]}

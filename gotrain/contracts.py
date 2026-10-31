@@ -199,7 +199,11 @@ class BandStats(BaseModel):
 
 
 class ModelVersion(BaseModel):
-    """A registered model: one promoted run of one task."""
+    """A registered model: one run of one task, or an ensemble of runs, with or without TTA.
+
+    `run_id` and `config` are the best member's; `val_score` is the whole model's (the
+    ensemble's, with TTA if set), as measured on VALIDATION.
+    """
 
     task: str
     version: str = Field(pattern=VERSION_PATTERN, description="'v1', 'v2', ...")
@@ -209,6 +213,20 @@ class ModelVersion(BaseModel):
     created_at: datetime
     git_commit: str = Field(min_length=1)
     artifact_path: str = Field(min_length=1, description="Local path or s3:// URI.")
+    members: list[str] = Field(
+        default_factory=list, description="Run ids averaged at inference; [run_id] if single."
+    )
+    tta: bool = Field(default=False, description="Test-time augmentation (8 flip/rot90 views).")
+
+    @model_validator(mode="after")
+    def _members_include_run(self) -> "ModelVersion":
+        if not self.members:  # versions registered before ensembles existed
+            self.members = [self.run_id]
+        if self.run_id not in self.members:
+            raise ValueError("run_id must be one of the members")
+        if len(set(self.members)) != len(self.members):
+            raise ValueError("members must be distinct runs")
+        return self
 
 
 class TestRecord(BaseModel):
@@ -222,6 +240,11 @@ class TestRecord(BaseModel):
     metric_name: str
     git_commit: str = Field(min_length=1)
     timestamp: datetime
+    # 95% bootstrap CI over test images; None on records written before it existed
+    ci_low: float | None = None
+    ci_high: float | None = None
+    ci_level: float | None = None
+    ci_resamples: int | None = None
 
 
 def format_errors(err: ValidationError, model: type[BaseModel] | None = None) -> str:

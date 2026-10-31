@@ -10,6 +10,7 @@ evaluation only ever happens when a human asks for it explicitly.
 import argparse
 import sys
 from collections.abc import Callable
+from pathlib import Path
 
 from pydantic import ValidationError
 
@@ -34,6 +35,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     run.add_argument("--phase", choices=["tune", "finalise"], default="tune")
     run.add_argument("--budget-min", type=float, help="total GPU budget for the task (tune)")
     run.add_argument("--max-tool-calls", type=int, help="tool-call limit for this session")
+    export = sub.add_parser("export", help="copy results from home(s) into the repo")
+    export.add_argument("--out", required=True, type=Path, help="e.g. results/")
+    export.add_argument("--home", action="append", type=Path, help="repeatable")
     return parser.parse_args(argv)
 
 
@@ -119,10 +123,27 @@ def run(args: argparse.Namespace, ask: Callable[[str], str] = input) -> int:
     return 0
 
 
+def export(args: argparse.Namespace) -> int:
+    from gotrain.export import export_results
+
+    try:
+        homes = [h.expanduser() for h in args.home] if args.home else [get_settings().home]
+    except ValidationError as exc:
+        return fail(f"bad settings:\n{exc}", 2)
+    missing = [str(h) for h in homes if not h.is_dir()]
+    if missing:
+        return fail(f"no such home: {', '.join(missing)}")
+    out = export_results(homes, args.out)
+    print(f"Exported {out['files']} files from {len(homes)} home(s). Summary: {out['summary']}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     if args.command == "run":
         return run(args)
+    if args.command == "export":
+        return export(args)
     return fail(f"unknown command {args.command!r}", 2)
 
 

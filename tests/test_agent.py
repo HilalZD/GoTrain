@@ -82,6 +82,7 @@ def test_tune_tools_exclude_final_test():
         "run_trials",
         "promote",
         "confirm_seeds",
+        "evaluate_candidates",
         "leaderboard",
         "diagnose",
         "register_model",

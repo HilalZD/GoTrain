@@ -5,20 +5,34 @@ end a session early, with budget left and nothing registered. The driver:
 
 1. sends up to MAX_CONTINUATIONS "Continue your plan" messages while the agent ended its
    turn, budget remains above one short trial, and it has not registered a model;
-2. if the session still ends with nothing registered but a successful run exists,
+2. at the end of a tune session, asks the agent for 2-5 lessons (validation results only) and
+   writes them with the tag "source:tune"; if that fails, writes one lesson from the leaderboard;
+3. if the session still ends with nothing registered but a successful run exists,
    registers the best run by validation itself, and says so in the audit log and journal.
 """
 
+import json
+import re
 from typing import Any
 
 from gotrain.agent import Phase, ToolCallLimit
 from gotrain.audit import AuditLog
+from gotrain.engine import get_engine
 from gotrain.engine.throughput import SCREEN_MINUTES
 from gotrain.tools._common import group_stats, load_entries, load_seed_groups, mean_std_text
+from gotrain.tools.memory import write_lesson
 from gotrain.tools.registry import list_versions, register_model
 from gotrain.tools.trials import budget_status
 
 MAX_CONTINUATIONS = 3
+TUNE_TAG = "source:tune"
+MIN_LESSONS, MAX_LESSONS = 2, 5
+LESSON_REQUEST = (
+    "The session is over. Reply with ONLY a JSON list of 2-5 lessons for future tasks, e.g. "
+    '[{"lesson": "one concrete finding with its validation scores", "tags": ["sentinel-2"]}]. '
+    "Base every lesson on VALIDATION results from this session only; never mention the test set. "
+    "Do not call any tool."
+)
 AUTO_REGISTER_NOTE = "auto-registered by harness: agent did not register"
 
 
@@ -106,6 +120,58 @@ def auto_register(task: str, audit: AuditLog) -> str | None:
     return out["version"]
 
 
+def lesson_tags(task: str) -> list[str]:
+    """Sensor and task type from the dataset card, so lessons match across tasks."""
+    try:
+        card = get_engine().describe_dataset(task)
+        return [str(card.sensor), str(card.task_type)]
+    except Exception:
+        return [task]
+
+
+def parse_lessons(text: str) -> list[dict]:
+    """The JSON list of {"lesson", "tags"} in the agent's reply (tolerates prose around it)."""
+    match = re.search(r"\[.*\]", text, re.DOTALL)
+    items = json.loads(match.group(0)) if match else []
+    good = [i for i in items if isinstance(i, dict) and str(i.get("lesson", "")).strip()]
+    return good[:MAX_LESSONS]
+
+
+def automatic_lesson(task: str) -> str | None:
+    choice = best_for_registration(task)
+    if choice is None:
+        return None
+    entry, basis = choice
+    return (
+        f"Best validation result on {task} (auto-written by harness): {entry.get('config', '?')}"
+        f" with val {entry['metric_name']} {entry['val_score']:.4f}; {basis}."
+    )
+
+
+def write_session_lessons(agent: Any, audit: AuditLog, task: str) -> int:
+    """Lessons from a tune session, tagged source:tune. Returns how many were written."""
+    base_tags = [TUNE_TAG, *lesson_tags(task)]
+    lessons: list[dict] = []
+    try:
+        lessons = parse_lessons(str(agent(LESSON_REQUEST)))
+    except Exception as exc:
+        audit.log("lessons_agent_failed", error=f"{type(exc).__name__}: {exc}")
+    if len(lessons) < MIN_LESSONS:
+        auto = automatic_lesson(task)
+        lessons = [{"lesson": auto, "tags": []}] if auto else []
+        source = "automatic"
+    else:
+        source = "agent"
+    written = 0
+    for item in lessons:
+        tags = [*base_tags, *[t for t in item.get("tags") or [] if isinstance(t, str)]]
+        out = write_lesson(task, str(item["lesson"]), tags)
+        written += "error" not in out
+    audit.log("session_lessons", source=source, written=written)
+    audit.journal(f"**HARNESS:** wrote {written} {source} lesson(s) tagged `{TUNE_TAG}`.")
+    return written
+
+
 def run_session(
     agent: Any,
     audit: AuditLog,
@@ -132,10 +198,12 @@ def run_session(
     if phase == "tune" and not new_versions:
         version = auto_register(task, audit)
         registered_by = "harness" if version else None
+    lessons = write_session_lessons(agent, audit, task) if phase == "tune" else 0
     return {
         "stop_reason": str(result.stop_reason),
         "continuations": continuations,
         "registered_by": registered_by,
         "version": version,
+        "lessons_written": lessons,
         "usage": getattr(getattr(result, "metrics", None), "accumulated_usage", None),
     }

@@ -37,8 +37,8 @@ when to push and when to stop:
   instead of polishing the leader.
 - **In between:** exploit: promote and refine the leaders.
 - **Within ~1 point of it, or above:** stop exploring. Spend the remaining budget on
-  confirming the result (`confirm_seeds`), and on ensembles and test-time augmentation
-  once those tools are available to you.
+  confirming the result (`confirm_seeds`), then on ensembles and test-time augmentation
+  (`evaluate_candidates`, step 7).
 - A `human_baseline` is the team's bar: say in the `register_model` notes whether you
   matched it (as a validation score, it compares directly with yours).
 - Targets are scores only. Choose your configs from the data and your own trials.
@@ -95,8 +95,23 @@ when to push and when to stop:
      two candidates' stds. Smaller differences are a tie.
    - Pick the candidate with the best **mean** score (on a tie, prefer the cheaper or
      simpler one).
-7. **Finish** by calling `register_model` on a run of the chosen candidate. In the notes, say
-   it was chosen by mean validation score and give mean ± std for the candidates.
+7. **Ensembles and test-time augmentation (optional, leftover budget only).** Only once the
+   best score is in the target zone or exploration is done, and after the seed check, call
+   `evaluate_candidates` to score, on VALIDATION, models built from finished runs:
+   - Compare the **single best run with and without TTA**, the **top-2 ensemble** and the
+     **top-3 ensemble**, each with and without TTA (the single best without TTA is always
+     scored as the baseline). TTA candidates cost 8x the inference time.
+   - **If candidates tie within the measured seed noise, choose the SIMPLER one: fewer
+     members first, then no TTA.** The tool's `recommended` applies this rule; a bigger
+     model must beat it by more than the noise to be worth choosing.
+   - **At most 2 `evaluate_candidates` calls per session.** Every extra comparison on the
+     same validation set makes the winner's score more optimistic; a third call is blocked.
+   - Skip this step if the budget left can't pay for it; the single best run is a fine model.
+8. **Finish** by calling `register_model` on the chosen model: `run_id` for a single run, or
+   `run_ids` + `tta` for exactly a candidate scored by `evaluate_candidates` (a run with
+   `tta=true` counts as such a candidate). In the notes, say it was chosen by mean
+   validation score and give mean ± std for the candidates (and, for an ensemble or TTA,
+   its `delta_vs_single_best`).
    **Registering without a seed check is allowed only if the plan explicitly ran out of
    budget**, and then the notes must say so: "single-seed score, not seed-checked: budget
    exhausted". Then stop.

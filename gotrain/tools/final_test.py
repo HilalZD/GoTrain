@@ -10,12 +10,12 @@ may run it, and every real test is recorded in the global test ledger, which ref
 task already tested from any home.
 """
 
+from gotrain.bootstrap import bootstrap_ci
 from gotrain.config import get_settings
 from gotrain.contracts import TestRecord
 from gotrain.engine import get_engine
 from gotrain.tools._common import (
     error,
-    find_entry,
     git_commit,
     now_utc,
     read_json,
@@ -23,12 +23,38 @@ from gotrain.tools._common import (
     tool,
     write_json,
 )
-from gotrain.tools.registry import list_versions, load_version, version_key
+from gotrain.tools.registry import list_versions, load_version, version_checkpoints
 from gotrain.vault import append_ledger, ledger_entries, real_test_problem
 
 
 def lock_key(task: str) -> str:
     return f"registry/{task}/TEST_LOCK.json"
+
+
+def task_type_of(task: str) -> str:
+    return get_engine().describe_dataset(task).task_type
+
+
+def ci_text(record: TestRecord) -> str:
+    if record.ci_low is None or record.ci_high is None:
+        return "n/a"
+    return f"[{record.ci_low:.4f}, {record.ci_high:.4f}] ({record.ci_level:.0%} bootstrap CI)"
+
+
+def append_card_result(task: str, version: str, record: TestRecord) -> None:
+    """Add the test result to the version's model card (best effort: the lock is the record)."""
+    key = f"registry/{task}/{version}/model_card.md"
+    try:
+        card = storage().read_text(key)
+        section = (
+            "\n## Test result\n\n"
+            f"- Test {record.metric_name}: **{record.test_score:.4f}**\n"
+            f"- 95% CI: {ci_text(record)}\n"
+            f"- Scored: {record.timestamp.isoformat()}\n"
+        )
+        storage().write_text(key, card.rstrip("\n") + "\n" + section)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 @tool
@@ -57,10 +83,12 @@ def final_test(task: str, version: str) -> dict:
             f"no registered version {version!r} for {task}",
             f"Registered versions: {list_versions(task) or 'none - call register_model first'}.",
         )
-    entry = find_entry(mv.run_id)
-    if entry is None or not entry.get("checkpoint"):
-        return error(f"cannot locate the checkpoint of {version}", "This is a registry bug.")
-    checkpoint = storage().local_path(version_key(task, version)) / entry["checkpoint"]
+    checkpoints = version_checkpoints(mv)
+    if checkpoints is None:
+        return error(f"cannot locate the checkpoints of {version}", "This is a registry bug.")
+    # Exactly the model chosen on VALIDATION: one checkpoint or the ensemble, TTA as registered.
+    checkpoint = checkpoints[0] if len(checkpoints) == 1 else checkpoints
+    tta = {"tta": True} if mv.tta else {}  # only passed when set, so v1 engines keep working
 
     real = get_settings().engine == "real"
     lock = {"task": task, "version": version, "timestamp": now_utc().isoformat()}
@@ -68,7 +96,7 @@ def final_test(task: str, version: str) -> dict:
     if real:
         append_ledger(task, "started", version=version)
     try:
-        out = get_engine().evaluate(task, checkpoint, split="test")
+        out = get_engine().evaluate(task, checkpoint, split="test", **tta)
     except Exception as exc:  # keep the lock: the test set may already have been read
         failed = {"status": "failed", **lock, "error": f"{type(exc).__name__}: {exc}"}
         write_json(lock_key(task), failed)
@@ -79,6 +107,10 @@ def final_test(task: str, version: str) -> dict:
             "Stop here. The test lock stays in place; a human must inspect and remove it.",
             lock=failed,
         )
+    try:  # the CI is extra: never let it lose a test score that was already read
+        ci = bootstrap_ci(task_type_of(task), out.get("per_sample") or {}) or {}
+    except Exception:  # noqa: BLE001
+        ci = {}
     record = TestRecord(
         task=task,
         version=version,
@@ -86,8 +118,11 @@ def final_test(task: str, version: str) -> dict:
         metric_name=out["metric_name"],
         git_commit=git_commit(),
         timestamp=now_utc(),
+        **ci,
     )
     write_json(lock_key(task), {"status": "done", **record.model_dump(mode="json")})
     if real:
         append_ledger(task, "done", **record.model_dump(mode="json", exclude={"task"}))
-    return {**record.model_dump(mode="json"), "val_score": mv.val_score, "locked": True}
+    append_card_result(task, version, record)
+    model = {"members": mv.members, "tta": mv.tta}
+    return {**record.model_dump(mode="json"), **model, "val_score": mv.val_score, "locked": True}

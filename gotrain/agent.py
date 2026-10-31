@@ -33,6 +33,7 @@ from gotrain.contracts import TrainConfig
 from gotrain.tools import (
     confirm_seeds,
     diagnose,
+    evaluate_candidates,
     final_test,
     inspect_dataset,
     leaderboard,
@@ -43,6 +44,7 @@ from gotrain.tools import (
     run_trials,
     write_lesson,
 )
+from gotrain.tools.candidates import MAX_CALLS_PER_SESSION, SELECTION_RULES
 from gotrain.tools.diagnose import OBSERVATION_MARKERS, diagnose_for_model
 from gotrain.tools.registry import list_versions, load_version
 from gotrain.tools.trials import budget_status
@@ -56,6 +58,7 @@ PHASE_TOOLS = {
         run_trials,
         promote,
         confirm_seeds,
+        evaluate_candidates,
         leaderboard,
         diagnose,
         register_model,
@@ -111,6 +114,39 @@ class ToolCallLimit(HookProvider):
     def _after_tools(self, event: AfterToolsEvent) -> None:
         if self.calls >= self.hard_limit:
             event.end_turn = f"Stopped: tool-call limit ({self.hard_limit}) reached."
+
+
+class SelectionQuota(HookProvider):
+    """At most MAX_CALLS_PER_SESSION successful evaluate_candidates calls per session: every
+    extra comparison on the same validation set makes the winner's score more optimistic.
+    Calls that returned an error (nothing evaluated) don't count."""
+
+    TOOL = "evaluate_candidates"
+
+    def __init__(self, audit: AuditLog, max_calls: int = MAX_CALLS_PER_SESSION):
+        self.audit = audit
+        self.max_calls = max_calls
+        self.used = 0
+
+    def register_hooks(self, registry: HookRegistry, **kwargs: Any) -> None:
+        registry.add_callback(BeforeToolCallEvent, self._before_tool)
+        registry.add_callback(AfterToolCallEvent, self._after_tool)
+
+    def _before_tool(self, event: BeforeToolCallEvent) -> None:
+        if event.tool_use["name"] != self.TOOL or self.used < self.max_calls:
+            return
+        event.cancel_tool = (
+            f"Blocked: evaluate_candidates was already used {self.used} times this session "
+            f"(the limit). {SELECTION_RULES} Register your choice from the earlier results."
+        )
+        self.audit.log("selection_quota_enforced", used=self.used, max=self.max_calls)
+
+    def _after_tool(self, event: AfterToolCallEvent) -> None:
+        if event.tool_use["name"] != self.TOOL or event.cancel_message:
+            return
+        result = event.result
+        if result.get("status") == "success" and not result_error(result, result_text(result)):
+            self.used += 1
 
 
 class ObservationGate(HookProvider):
@@ -251,8 +287,8 @@ def build_agent(
     limit = limit or make_limit(phase, max_tool_calls)
     audit = audit or AuditLog(task, phase)
     hooks: list[HookProvider] = [audit, limit]
-    if phase == "tune":  # diagnose only exists in tune
-        hooks.append(ObservationGate(audit))
+    if phase == "tune":  # diagnose and evaluate_candidates only exist in tune
+        hooks += [ObservationGate(audit), SelectionQuota(audit)]
     return Agent(
         model=model or build_model(get_settings()),
         tools=[to_strands_tool(fn) for fn in PHASE_TOOLS[phase]],
@@ -282,5 +318,7 @@ def kickoff_message(task: str, phase: Phase, max_tool_calls: int | None = None) 
         lines.append("Registered versions (validation scores):")
         for version in list_versions(task):
             mv = load_version(task, version)
-            lines.append(f"- {version}: val_score={mv.val_score:.4f} (run {mv.run_id})")
+            model = f"run {mv.run_id}" if len(mv.members) == 1 else f"ensemble {mv.members}"
+            tta = ", TTA" if mv.tta else ""
+            lines.append(f"- {version}: val_score={mv.val_score:.4f} ({model}{tta})")
     return "\n".join(lines)

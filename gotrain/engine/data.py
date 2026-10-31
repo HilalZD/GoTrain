@@ -841,27 +841,40 @@ def split_fingerprint(task_name: str, split: str, ds: Any, bands: list[str]) -> 
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-def load_cache(task_name: str, split: str, ds: Any, bands: list[str]) -> tuple | None:
-    """Memory-mapped (x, y) if a valid cache exists for this split, else None."""
+def check_cache(task_name: str, split: str, ds: Any, bands: list[str]) -> tuple:
+    """(memory-mapped (x, y), None) if a valid cache exists, else (None, reason).
+
+    Every reason the engine falls back to hdf5 is named, so a slow run can be explained.
+    The cache location is cache_root(): $GOTRAIN_DATA_CACHE, default ~/data_cache. A different
+    GEO_BENCH_DIR does NOT invalidate it by itself: the fingerprint covers the sample list and
+    the files' total size, not their folder, so an identical copy of the data still matches.
+    """
     if split not in CACHE_SPLITS:
-        return None
+        return None, f"the {split} split is never cached"
     folder = cache_root() / task_name
     meta_path = folder / f"{split}_meta.json"
     if not meta_path.exists():
-        return None
+        return None, f"no cache at {folder} (build it: scripts/build_cache.py {task_name})"
     try:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        if meta.get("format") != CACHE_FORMAT or meta.get("bands") != bands:
-            return None
+        if meta.get("format") != CACHE_FORMAT:
+            return None, f"cache format {meta.get('format')} != {CACHE_FORMAT} (rebuild it)"
+        if meta.get("bands") != bands:
+            return None, f"cache was built for bands {meta.get('bands')} (rebuild it)"
         if meta.get("fingerprint") != split_fingerprint(task_name, split, ds, bands):
-            return None
+            return None, "stale cache: the source files changed since it was built (rebuild it)"
         x = np.load(folder / f"{split}_x.npy", mmap_mode="r")
         y = np.load(folder / f"{split}_y.npy", mmap_mode="r")
-    except (OSError, ValueError):
-        return None
+    except (OSError, ValueError) as exc:
+        return None, f"cache unreadable: {type(exc).__name__}: {exc}"
     if len(x) != len(ds) or len(y) != len(ds):
-        return None
-    return x, y
+        return None, f"cache has {len(x)} rows but the split has {len(ds)} (rebuild it)"
+    return (x, y), None
+
+
+def load_cache(task_name: str, split: str, ds: Any, bands: list[str]) -> tuple | None:
+    """Memory-mapped (x, y) if a valid cache exists for this split, else None."""
+    return check_cache(task_name, split, ds, bands)[0]
 
 
 def cache_bytes(n: int, image_hwc: tuple, label_shape: tuple, label_itemsize: int) -> int:
@@ -986,9 +999,12 @@ class GeoBenchDataset:
         self.indices = list(indices) if indices is not None else list(range(len(self.ds)))
         self._cache: dict[int, tuple[np.ndarray, Any]] | None = {} if cache else None
         # on-disk .npy cache (train/val only; load_cache returns None for the test split)
-        self.disk_cache = (
-            load_cache(task_name, split, self.ds, self.all_bands) if use_cache else None
-        )
+        if use_cache:
+            self.disk_cache, self.cache_reason = check_cache(
+                task_name, split, self.ds, self.all_bands
+            )
+        else:
+            self.disk_cache, self.cache_reason = None, "disabled (use_cache=False)"
 
     def _norm_params(self, norm: Norm) -> tuple[np.ndarray, np.ndarray]:
         n = len(self.bands)

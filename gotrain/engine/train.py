@@ -36,6 +36,7 @@ import json
 import math
 import os
 import random
+import sys
 import time
 import traceback
 from dataclasses import asdict
@@ -51,6 +52,7 @@ from gotrain.engine.data import (
     NODATA_CLASSES,
     TEST_SPLIT,
     GeoBenchDataset,
+    cache_root,
     describe_dataset,
     subset_indices,
 )
@@ -510,6 +512,29 @@ def _seed_everything(seed: int) -> None:
     torch.manual_seed(seed)
 
 
+def cache_report(train_ds: Any, val_ds: Any) -> dict:
+    """metrics.json: whether each split came from the .npy cache, and why not."""
+    report: dict[str, Any] = {"root": str(cache_root())}
+    for name, ds in (("train", train_ds), ("val", val_ds)):
+        report[name] = {"used": ds.disk_cache is not None, "reason": ds.cache_reason}
+    return report
+
+
+def warn_if_no_cache(task: str, train_ds: Any, val_ds: Any) -> None:
+    """A loud warning in the run log for every split read from hdf5 (much slower on the T4)."""
+    bar = "!" * 88
+    for name, ds in (("train", train_ds), ("val", val_ds)):
+        if ds.disk_cache is None:
+            lines = [
+                "",
+                bar,
+                f"WARNING: data cache NOT used for {task}/{name}: {ds.cache_reason}",
+                "         Reading hdf5 tiles instead: correct, but much slower.",
+                bar,
+            ]
+            print("\n".join(lines), file=sys.stderr, flush=True)
+
+
 def loader_settings(device: Any) -> dict:
     """DataLoader worker settings.
 
@@ -609,6 +634,7 @@ def _train(
     inputs = {"bands": spec.bands, "norm": norm, "zero_fill": spec.zero_fill}
     train_ds = GeoBenchDataset(config.task, "train", indices=train_idx, **inputs)
     val_ds = GeoBenchDataset(config.task, "val", **inputs)
+    warn_if_no_cache(config.task, train_ds, val_ds)
     train_dl, val_dl = _loaders(train_ds, val_ds, config.batch_size, device)
     model = build_model(spec).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
@@ -727,10 +753,7 @@ def _train(
             "minutes_used": round(minutes, 3),
             "budget_minutes": budget_minutes,
             "n_train": len(train_ds),
-            "data_cache": {
-                "train": train_ds.disk_cache is not None,
-                "val": val_ds.disk_cache is not None,
-            },
+            "data_cache": cache_report(train_ds, val_ds),
             "n_val": len(val_ds),
             "device": str(device),
             "bands": bands,

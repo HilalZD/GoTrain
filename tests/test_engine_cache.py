@@ -142,11 +142,13 @@ def test_train_gives_the_same_score_with_and_without_cache(use_cache_dir, tmp_pa
     # schedule depends only on steps and the two runs differ ONLY in where the data comes from.
     with_cache = engine.train(config, 600.0, tmp_path / "run-cache")
     metrics = json.loads((tmp_path / "run-cache" / "metrics.json").read_text())
-    assert metrics["data_cache"] == {"train": True, "val": True}
+    assert metrics["data_cache"]["train"] == {"used": True, "reason": None}
+    assert metrics["data_cache"]["val"] == {"used": True, "reason": None}
     monkeypatch.setenv("GOTRAIN_DATA_CACHE", str(tmp_path / "no-cache-here"))
     without = engine.train(config, 600.0, tmp_path / "run-hdf5")
     metrics = json.loads((tmp_path / "run-hdf5" / "metrics.json").read_text())
-    assert metrics["data_cache"] == {"train": False, "val": False}
+    assert metrics["data_cache"]["train"]["used"] is False
+    assert "no cache at" in metrics["data_cache"]["train"]["reason"]
     assert with_cache.status == without.status == "ok"
     assert with_cache.val_score == pytest.approx(without.val_score, abs=1e-6)
 
@@ -192,3 +194,32 @@ def test_worker_processes_give_the_same_batches(use_cache_dir):
     workers = DataLoader(cached, 16, num_workers=2, multiprocessing_context="spawn")
     for (xw, yw), (xd, yd) in zip(workers, DataLoader(direct, 16), strict=True):
         assert torch.equal(xw, xd) and torch.equal(yw, yd)
+
+
+def test_fallback_reasons_are_named(monkeypatch, tmp_path):
+    monkeypatch.setenv("GOTRAIN_DATA_CACHE", str(tmp_path))
+    assert "never cached" in data.check_cache("m-eurosat", data.TEST_SPLIT, None, [])[1]
+    cache, reason = data.check_cache("m-eurosat", "val", None, [])
+    assert cache is None and "no cache at" in reason and "build_cache.py m-eurosat" in reason
+
+
+@needs_eurosat
+def test_stale_cache_reason_and_loud_warning(use_cache_dir, capsys):
+    from gotrain.engine import train as engine
+
+    meta_path = use_cache_dir / "m-eurosat" / "val_meta.json"
+    original = meta_path.read_text()
+    try:
+        meta_path.write_text(json.dumps(json.loads(original) | {"fingerprint": "0" * 64}))
+        stale = data.GeoBenchDataset("m-eurosat", "val")
+        assert stale.disk_cache is None and stale.cache_reason.startswith("stale cache")
+        fresh = data.GeoBenchDataset("m-eurosat", "train")
+        engine.warn_if_no_cache("m-eurosat", fresh, stale)
+        err = capsys.readouterr().err
+        assert "WARNING: data cache NOT used for m-eurosat/val: stale cache" in err
+        assert "m-eurosat/train" not in err  # the train cache is valid: no warning
+        report = engine.cache_report(fresh, stale)
+        assert report["train"]["used"] is True and report["val"]["used"] is False
+        assert report["root"] == str(use_cache_dir)
+    finally:
+        meta_path.write_text(original)

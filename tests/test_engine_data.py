@@ -8,6 +8,7 @@ import json
 import re
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from gotrain.contracts import DatasetCard
@@ -233,9 +234,76 @@ def test_brick_kiln_card_warns_about_accuracy():
     assert check_combo(card, "resnet50", "ssl4eo_s2") is None  # sensor reads as Sentinel-2
 
 
-def test_majority_note_only_for_imbalanced_classification():
-    assert "Majority baseline" not in data.to_dataset_card(recon("m-eurosat")).notes
-    assert "Majority baseline" not in data.to_dataset_card(recon("m-pv4ger-seg")).notes
+# ------------------------------------------------------------------ request #11: shortcut metrics
+def test_majority_baseline_classification_uses_train_majority_on_val():
+    from collections import Counter
+
+    out = data.majority_class_baseline(
+        "classification", Counter({0: 70, 1: 30}), Counter({0: 60, 1: 40}), 100, ["a", "b"]
+    )
+    assert out == {"predict": "a", "metric": "accuracy", "score": 0.6}
+
+
+def test_majority_baseline_segmentation_follows_v2_miou():
+    from collections import Counter
+
+    # val pixels: 80 of class 0, 20 of class 1, class 2 absent -> (0.8 + 0) / 2 present classes
+    out = data.majority_class_baseline(
+        "segmentation", Counter({0: 900, 1: 100}), Counter({0: 80, 1: 20}), 5, ["x", "y", "z"]
+    )
+    assert out["metric"] == "miou" and out["score"] == pytest.approx(0.4)
+
+
+def test_majority_baseline_multilabel_micro_f1():
+    from collections import Counter
+
+    train = Counter({0: 8, 1: 2, "_n": 10})  # label 0 positive in 80% of train -> always on
+    out = data.majority_class_baseline("multilabel", train, Counter({0: 3, 1: 1}), 4, ["p", "q"])
+    assert out["predict"] == ["p"] and out["score"] == pytest.approx(2 * 3 / (2 * 3 + 1 + 1))
+
+
+def test_tile_spread_ignores_nodata_and_flags_empty_tiles():
+    tile = np.zeros((4, 4, 2))
+    tile[0, :, 0] = [10, 20, 30, 40]
+    tile[0, :, 1] = [1, 1, 1, 1]
+    spread = data.tile_spread(tile)  # only the 4 non-zero pixels count
+    assert spread[0] == pytest.approx(
+        np.percentile([10, 20, 30, 40], 98) - np.percentile([10, 20, 30, 40], 2)
+    )
+    assert spread[1] == 0.0
+    assert np.isnan(data.tile_spread(np.zeros((2, 2, 3)))).all()
+
+
+def test_flat_tile_fraction_per_class():
+    std = np.array([10.0, 10.0])
+    spreads = np.array([[1.0, 1.0], [50.0, 40.0], [2.0, 30.0], [np.nan, np.nan]])
+    classes = [[0], [1], [1], [0]]  # contrasts: 0.1 flat, 4.5, 1.6, NaN (empty) -> flat
+    out = data.flat_tile_fraction(spreads, std, classes, ["water", "land", "never"])
+    assert out["threshold"] == data.FLAT_THRESHOLD and out["n_tiles"] == 4
+    assert out["overall"] == 0.5
+    assert out["per_class"] == {"water": 1.0, "land": 0.0, "never": None}
+
+
+def test_eurosat_card_reports_baseline_and_flat_water():
+    card = data.to_dataset_card(recon("m-eurosat"))
+    assert "Majority-class baseline on val" in card.notes and "0.100 accuracy" in card.notes
+    assert "Nearly flat (low-contrast) tiles" in card.notes
+    assert "Possible shortcut: flat tiles are far more common in 'Sea and Lake'" in card.notes
+
+
+def test_pv4ger_card_has_no_flat_tiles_and_a_miou_baseline():
+    rec = recon("m-pv4ger-seg")
+    assert rec["majority_class_baseline"]["metric"] == "miou"
+    assert rec["majority_class_baseline"]["score"] == pytest.approx(0.40, abs=0.01)
+    assert rec["flat_tile_fraction"]["overall"] == 0.0
+    assert "Possible shortcut" not in data.to_dataset_card(rec).notes
+
+
+def test_cards_without_the_new_fields_still_work():
+    rec = recon("m-eurosat")
+    rec.pop("majority_class_baseline")
+    rec.pop("flat_tile_fraction")
+    assert "Majority-class baseline" not in data.to_dataset_card(rec).notes
 
 
 def test_near_infrared_band_name_gives_rgbn_slug():
@@ -247,3 +315,15 @@ def test_near_infrared_band_name_gives_rgbn_slug():
         bands_info = [SpectralBand(n) for n in ("Red", "Green", "Blue", "NearInfrared")]
 
     assert data.sensor(Task()) == "aerial-rgbn"
+
+
+def test_agent_discovers_shortcut_notes_through_its_own_tool(monkeypatch):
+    """The agent's inspect_dataset tool (real engine) shows the baseline and flat-tile notes."""
+    from gotrain.tools.inspect import inspect_dataset
+
+    monkeypatch.setenv("GOTRAIN_ENGINE", "real")
+    monkeypatch.setenv("GOTRAIN_STATS_DIR", str(STATS))
+    out = inspect_dataset("m-eurosat")
+    notes = out["dataset"]["notes"]
+    assert "Majority-class baseline on val" in notes
+    assert "Possible shortcut" in notes and "Sea and Lake" in notes

@@ -86,6 +86,21 @@
   "band_names_corrected": false,
   "class_names_corrected": false,
   "excluded_pixels": 0,
+  "majority_class_baseline": {
+    "predict": "no solar pv",
+    "metric": "miou",
+    "score": 0.4002
+  },
+  "flat_tile_fraction": {
+    "definition": "a tile is nearly flat when the median over bands of (p98 - p2 of its valid pixels in that band) / (that band's train std) is below 0.25",
+    "threshold": 0.25,
+    "n_tiles": 2000,
+    "overall": 0.0,
+    "per_class": {
+      "no solar pv": 0.0,
+      "solar pv": 0.0
+    }
+  },
   "example_sample": {
     "name": "7.001829544,52.21933747",
     "shape_hwc": [

@@ -222,6 +222,29 @@
   "band_names_corrected": true,
   "class_names_corrected": true,
   "excluded_pixels": 0,
+  "majority_class_baseline": {
+    "predict": "Annual Crop",
+    "metric": "accuracy",
+    "score": 0.1
+  },
+  "flat_tile_fraction": {
+    "definition": "a tile is nearly flat when the median over bands of (p98 - p2 of its valid pixels in that band) / (that band's train std) is below 0.25",
+    "threshold": 0.25,
+    "n_tiles": 2000,
+    "overall": 0.0765,
+    "per_class": {
+      "Annual Crop": 0.0,
+      "Forest": 0.015,
+      "Herbaceous Vegetation": 0.0,
+      "Highway": 0.0,
+      "Industrial Buildings": 0.0,
+      "Pasture": 0.0,
+      "Permanent Crop": 0.0,
+      "Residential Buildings": 0.0,
+      "River": 0.0,
+      "Sea and Lake": 0.75
+    }
+  },
   "example_sample": {
     "name": "id_12886",
     "shape_hwc": [

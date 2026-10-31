@@ -707,6 +707,7 @@ def _train(
             "epochs_run": len(history),
             "full_epochs": full_epochs,
             "stop_reason": stop_reason,
+            "stopped_by_budget": stop_reason == "budget",  # contract request #2 (Hilal)
             **nodata_extras(config.task, (best["preds"] or {}).get("confusion")),
             "minutes_used": round(minutes, 3),
             "budget_minutes": budget_minutes,

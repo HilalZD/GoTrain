@@ -38,6 +38,17 @@ GEOBENCH_SPLITS = {"train": "train", "val": "valid", TEST_SPLIT: TEST_SPLIT}
 IGNORE_INDEX = -100  # mask pixels outside [0, n_classes); torch's cross-entropy default
 NODATA_RULE = "pixels where every band is exactly 0, plus NaN/inf values"
 NEARLY_EMPTY_RATIO = 0.01  # a band whose p99 is <1% of the largest band's p99
+# Flat (low-contrast) tiles. A tile's contrast is the MEDIAN over bands of
+# (p98 - p2 of the tile's valid pixels in that band) / (that band's TRAIN std): unit-free, so it
+# works for reflectance, 8-bit and 0-1 data, and one odd band (e.g. near-empty B10) can't decide.
+# Chosen from data: m-eurosat's contrast is bimodal (5% of tiles < 0.06, 90% > 0.5); 0.25 sits in
+# the gap. For brick-kiln's B04 it is ~90 DN, above the 50 DN that undercounted (gotcha 23).
+FLAT_THRESHOLD = 0.25
+FLAT_DEFINITION = (
+    "a tile is nearly flat when the median over bands of (p98 - p2 of its valid pixels in that "
+    f"band) / (that band's train std) is below {FLAT_THRESHOLD}"
+)
+SHORTCUT_GAP = 0.05  # flag when per-class flat shares differ by >= 5 points
 
 # Upstream errata: geo-bench README "Known issues", issues #28 and #29. The pixel data is fine,
 # but the stored band names are wrong for most channels. These are the TRUE names, in order.
@@ -85,10 +96,6 @@ NODATA_CLASSES: dict[str, int] = {"m-chesapeake": 0}
 
 DATASET_FACTS: dict[str, list[str]] = {
     "m-brick-kiln": [
-        "Shortcut warning: almost-flat tiles (water, cloud, haze or fill; B04 2-98% spread < 50 "
-        "DN) are 10.8% of 'not brick kiln' train tiles and 0.0% of 'brick kiln' ones (CPU check "
-        "on 1,500 random train tiles, 2026-10-31). 'Flat tile => not kiln' is a free win that "
-        "inflates accuracy without detecting kilns.",
         "Kilns are small (about 100-150 m, 10-15 px of a 64 px tile) and mean NDVI is the same "
         "for both classes (0.40 vs 0.38): the model must find small objects, not land cover.",
     ],
@@ -386,6 +393,81 @@ def _scale_note(bands: list[str], p99: np.ndarray, notes: list[str]) -> None:
         )
 
 
+def tile_spread(arr_hwc: np.ndarray) -> np.ndarray:
+    """Per-band p98 - p2 over the tile's valid pixels (nodata and NaN/inf excluded); NaN if none."""
+    x = arr_hwc.reshape(-1, arr_hwc.shape[-1]).astype(np.float64)
+    x = x[np.isfinite(x).all(axis=1) & ~np.all(x == 0, axis=1)]
+    if len(x) == 0:
+        return np.full(arr_hwc.shape[-1], np.nan)
+    return np.percentile(x, 98, axis=0) - np.percentile(x, 2, axis=0)
+
+
+def tile_classes(label: Any, kind: str, n_classes: int) -> list[int]:
+    """Classes present in one tile: its label (classification), its positive labels
+    (multilabel), or the classes with at least one pixel (segmentation)."""
+    lab = np.asarray(label)
+    if kind == "segmentation":
+        return [int(v) for v in np.unique(lab) if 0 <= v < n_classes]
+    if kind == "multilabel":
+        return [int(c) for c in np.flatnonzero(lab)]
+    return [int(lab)]
+
+
+def flat_tile_fraction(
+    spreads: np.ndarray, std: np.ndarray, classes: list[list[int]], class_names: list[str]
+) -> dict:
+    """Share of sampled train tiles that are nearly flat, overall and per class (see
+    FLAT_DEFINITION). A tile with no valid pixel at all counts as flat."""
+    safe_std = np.where(np.asarray(std) > 1e-6, std, np.nan)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", RuntimeWarning)
+        contrast = np.nanmedian(spreads / safe_std, axis=1)
+    flat = ~(contrast >= FLAT_THRESHOLD)  # NaN (all-nodata tile) counts as flat
+    per_class = {}
+    for c, name in enumerate(class_names):
+        members = np.array([c in cl for cl in classes], dtype=bool)
+        per_class[name] = round(float(flat[members].mean()), 4) if members.any() else None
+    return {
+        "definition": FLAT_DEFINITION,
+        "threshold": FLAT_THRESHOLD,
+        "n_tiles": int(len(flat)),
+        "overall": round(float(flat.mean()), 4) if len(flat) else 0.0,
+        "per_class": per_class,
+    }
+
+
+def majority_class_baseline(
+    kind: str, train_counts: Counter, val_counts: Counter, n_val: int, class_names: list[str]
+) -> dict:
+    """Score on VAL of always predicting the most common TRAIN class, with the official metric.
+
+    classification: accuracy = share of val samples in that class.
+    segmentation:   mIoU as in contract v2: the majority class gets IoU = its share of valid val
+                    pixels, every other class present in val gets IoU 0, classes absent from val
+                    are skipped.
+    multilabel:     micro-F1 of predicting every label that is positive in >= 50% of train images.
+    """
+    k = len(class_names)
+    major = max(range(k), key=lambda c: train_counts.get(c, 0))
+    if kind == "multilabel":
+        n_train = max(train_counts.get("_n", 0), 1)
+        on = [c for c in range(k) if train_counts.get(c, 0) / n_train >= 0.5]
+        tp = sum(val_counts.get(c, 0) for c in on)
+        fp = sum(n_val - val_counts.get(c, 0) for c in on)
+        fn = sum(val_counts.get(c, 0) for c in range(k) if c not in on)
+        score = 2 * tp / max(2 * tp + fp + fn, 1)
+        return {"predict": [class_names[c] for c in on], "metric": "f1", "score": round(score, 4)}
+    if kind == "segmentation":
+        valid = sum(val_counts.get(c, 0) for c in range(k))
+        present = [c for c in range(k) if val_counts.get(c, 0) > 0 or c == major]
+        score = (val_counts.get(major, 0) / max(valid, 1)) / max(len(present), 1)
+        metric = "miou"
+    else:
+        score = val_counts.get(major, 0) / max(n_val, 1)
+        metric = "accuracy"
+    return {"predict": class_names[major], "metric": metric, "score": round(score, 4)}
+
+
 def inspect_task(
     task_name: str,
     data_dir: str | Path | None = None,
@@ -470,10 +552,14 @@ def inspect_task(
     train_hashes: dict[str, int] = {}
     dup_train = 0
     dtypes = set()
+    spreads, sample_classes = [], []
     for i in rng.choice(n_train, size=n_stats, replace=False):
-        arr, _, _ = sample_array(ds_train[int(i)])
+        sample = ds_train[int(i)]
+        arr, _, _ = sample_array(sample)
         dtypes.add(str(arr.dtype))
         rs.update(arr)
+        spreads.append(tile_spread(arr))
+        sample_classes.append(tile_classes(label_value(sample.label), kind, n_classes))
         h = hashlib.md5(np.ascontiguousarray(arr).tobytes()).hexdigest()
         dup_train += h in train_hashes
         train_hashes[h] = int(i)
@@ -517,6 +603,12 @@ def inspect_task(
             "train.py must handle them."
         )
     _scale_note(bands, p99, notes)
+    flat = flat_tile_fraction(np.asarray(spreads), std, sample_classes, class_names)
+    train_counts = Counter(counts)
+    train_counts["_n"] = n_train
+    majority = majority_class_baseline(
+        kind, train_counts, _label_counts(ds_val, kind), n_val, class_names
+    )
     if n_train < 1000:
         notes.append(f"small train set ({n_train}): prefer pretrained backbones and augmentation.")
 
@@ -561,6 +653,8 @@ def inspect_task(
         "band_names_corrected": fixed,
         "class_names_corrected": names_fixed,
         "excluded_pixels": int(rs.excluded_pixels),
+        "majority_class_baseline": majority,
+        "flat_tile_fraction": flat,
         "example_sample": {
             "name": s0.sample_name,
             "shape_hwc": list(arr0.shape),
@@ -609,19 +703,44 @@ def _extra_notes(recon: dict) -> list[str]:
         recon["task_type"], "samples"
     )
     notes.append(f"class_distribution = fraction of train {unit}.")
-    if recon["task_type"] == "classification" and recon["class_distribution"]:
-        dist = {k: v["pct"] for k, v in recon["class_distribution"].items()}
-        major = max(dist, key=dist.get)
-        if dist[major] >= 60:
-            minor = min(dist, key=dist.get)
-            notes.append(
-                f"Majority baseline: always predicting '{major}' already scores "
-                f"{dist[major]:.1f}% accuracy. Judge models by F1/recall of '{minor}', not only "
-                "accuracy."
-            )
+    notes.extend(_shortcut_notes(recon))
     notes.extend(DATASET_FACTS.get(recon["task"], []))
     if recon.get("excluded_pixels"):
         notes.append(f"{recon['excluded_pixels']} sampled train pixels excluded from stats.")
+    return notes
+
+
+def _shortcut_notes(recon: dict) -> list[str]:
+    """Majority-class baseline and flat-tile shares, as notes the agent can read."""
+    notes = []
+    mb = recon.get("majority_class_baseline")
+    if mb:
+        what = mb["predict"] if isinstance(mb["predict"], str) else ", ".join(mb["predict"])
+        notes.append(
+            f"Majority-class baseline on val: always predicting '{what}' scores "
+            f"{mb['score']:.3f} {mb['metric']}. A model must clearly beat this; on imbalanced "
+            "tasks also check per-class recall in diagnose()."
+        )
+    ft = recon.get("flat_tile_fraction")
+    if ft:
+        shares = {k: v for k, v in ft["per_class"].items() if v is not None}
+        listed = sorted(shares.items(), key=lambda kv: -kv[1])[:10]
+        notes.append(
+            f"Nearly flat (low-contrast) tiles: {ft['overall']:.1%} of {ft['n_tiles']} sampled "
+            f"train tiles ({ft['definition']}). By class: "
+            + ", ".join(f"{k} {v:.1%}" for k, v in listed)
+            + "."
+        )
+        if shares and max(shares.values()) - min(shares.values()) >= SHORTCUT_GAP:
+            hi = max(shares, key=shares.get)
+            lo = min(shares, key=shares.get)
+            notes.append(
+                f"Possible shortcut: flat tiles are far more common in '{hi}' "
+                f"({shares[hi]:.1%}) than in '{lo}' ({shares[lo]:.1%}). A model can score by "
+                f"learning 'flat => {hi}' instead of the task. That is legitimate if flatness is "
+                "the class (e.g. open water) and a shortcut if it comes from clouds, haze or fill; "
+                "look at the error grid and per-class recall."
+            )
     return notes
 
 

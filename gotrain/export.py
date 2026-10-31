@@ -14,7 +14,13 @@ from gotrain.knowledge.targets import load_targets
 
 VERSION_DIR = re.compile(r"^v[1-9][0-9]*$")
 JOURNAL_SUFFIX = "_journal.md"
-REGISTRY_FILES = ("leaderboard.jsonl", "seed_groups.json", "budget.json", "TEST_LOCK.json")
+REGISTRY_FILES = (
+    "leaderboard.jsonl",
+    "seed_groups.json",
+    "budget.json",
+    "TEST_LOCK.json",
+    "REHEARSAL.json",
+)
 
 
 def read_json(path: Path) -> dict | list | None:

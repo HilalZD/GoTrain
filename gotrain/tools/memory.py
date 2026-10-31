@@ -65,6 +65,8 @@ def write_lesson(task: str, lesson: str, tags: list[str]) -> dict:
     """
     if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
         return error("tags must be a list of strings", 'e.g. ["sentinel-2", "classification"]')
+    if get_settings().rehearsal:  # a rehearsal must never leave a lesson that looks real
+        lesson, tags = f"REHEARSAL (val): {lesson}", [*tags, "rehearsal"]
     clean_tags = normalize_tags(tags)
     if not clean_tags or any("," in t for t in clean_tags):
         return error(

@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     official_home: Path = Field(
         default=Path("~/gotrain_home"), validation_alias="GOTRAIN_OFFICIAL_HOME"
     )
+    rehearsal: bool = Field(default=False, validation_alias="GOTRAIN_REHEARSAL")
     memory: Literal["shared", "empty"] = Field(default="shared", validation_alias="GOTRAIN_MEMORY")
     test_ledger: Path = Field(
         default=Path("~/.gotrain_test_ledger.jsonl"), validation_alias="GOTRAIN_TEST_LEDGER"

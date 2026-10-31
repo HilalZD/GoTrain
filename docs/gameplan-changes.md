@@ -474,3 +474,7 @@ published references and the human baseline from `targets.json`.
 ## First-epoch overhead
 
 `TimingModel` gains a fixed once-per-trial overhead (REAL_T4: +19 s classification, +28 s segmentation; fake engine: 0, it has its own setup minutes). It is added in `subset_for_epochs`, `screening_advice`, the timeout hint (`minutes_for_epochs`) and the ensemble/TTA inference estimate (once per member). Budget checks, halving costs and `can_afford_seed_check` use the trial budget the agent asks for (a cap that already includes the overhead), so they are unchanged.
+
+## finalise --rehearsal
+
+`gotrain run --task T --phase finalise --rehearsal` (sets GOTRAIN_REHEARSAL=1) runs the whole finalise path on split="val": any home, no confirmation, no TEST_LOCK, no ledger. `final_test` then calls `rehearse()`: result in `registry/<task>/REHEARSAL.json`, a "REHEARSAL (val)" section on the model card, every output marked, lessons prefixed "REHEARSAL (val):" and tagged `rehearsal`. The real test stays available afterwards. Export copies REHEARSAL.json.

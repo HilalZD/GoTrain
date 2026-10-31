@@ -8,6 +8,7 @@ evaluation only ever happens when a human asks for it explicitly.
 """
 
 import argparse
+import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -34,6 +35,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     run.add_argument("--task", required=True, help="GEO-Bench task, e.g. m-eurosat")
     run.add_argument("--phase", choices=["tune", "finalise"], default="tune")
     run.add_argument("--budget-min", type=float, help="total GPU budget for the task (tune)")
+    run.add_argument(
+        "--rehearsal",
+        action="store_true",
+        help="finalise on the VALIDATION split: no test lock, no ledger, any home",
+    )
     run.add_argument("--max-tool-calls", type=int, help="tool-call limit for this session")
     export = sub.add_parser("export", help="copy results from home(s) into the repo")
     export.add_argument("--out", required=True, type=Path, help="e.g. results/")
@@ -60,14 +66,18 @@ def prepare_tune(task: str, budget_min: float | None) -> str | None:
 
 def prepare_finalise(task: str, ask: Callable[[str], str]) -> str | None:
     """Check finalise can run and get the typed confirmation. Error message, or None."""
-    if get_storage().exists(lock_key(task)):
+    rehearsal = get_settings().rehearsal
+    if not rehearsal and get_storage().exists(lock_key(task)):
         return f"{task} has already been tested ({lock_key(task)} exists); refusing"
-    if problem := real_test_problem(task):
+    if not rehearsal and (problem := real_test_problem(task)):
         return f"test vault: {problem}; refusing"
     versions = list_versions(task)
     if not versions:
         return f"no registered versions for {task}; run the tune phase first"
     print(f"Registered versions of {task}: {', '.join(versions)}")
+    if rehearsal:
+        print("REHEARSAL (val): scoring on VALIDATION; no test lock, no ledger. No confirmation.")
+        return None
     print("The finalise phase scores ONE version on the TEST set. This can only happen once.")
     try:
         answer = ask(f"Type the task name ({task}) to confirm: ")
@@ -79,6 +89,10 @@ def prepare_finalise(task: str, ask: Callable[[str], str]) -> str | None:
 
 
 def run(args: argparse.Namespace, ask: Callable[[str], str] = input) -> int:
+    if getattr(args, "rehearsal", False):
+        if args.phase != "finalise":
+            return fail("--rehearsal only applies to --phase finalise", 2)
+        os.environ["GOTRAIN_REHEARSAL"] = "1"
     try:
         settings = get_settings()
         get_engine().describe_dataset(args.task)

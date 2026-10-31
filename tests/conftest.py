@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 
@@ -13,7 +15,8 @@ def home(monkeypatch, tmp_path):
     monkeypatch.setenv("GOTRAIN_OFFICIAL_HOME", str(tmp_path / "gotrain_home"))
     monkeypatch.setenv("GOTRAIN_TEST_LEDGER", str(tmp_path / "test_ledger.jsonl"))
     monkeypatch.delenv("GOTRAIN_BUCKET", raising=False)
-    return dev_home
+    yield dev_home
+    os.environ.pop("GOTRAIN_REHEARSAL", None)  # `gotrain run --rehearsal` sets it process-wide
 
 
 def make_config(**overrides) -> dict:

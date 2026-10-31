@@ -649,3 +649,7 @@ def evaluate(task: str, checkpoint_path: Path, split: str, tta: bool = False) ->
         "n_samples": len(ds),
         "tta": tta,
     }
+
+
+# Integration rule (Hilal): diagnose() lives in diagnostics.py; the agent side imports it from here.
+from gotrain.engine.diagnostics import diagnose  # noqa: E402, F401

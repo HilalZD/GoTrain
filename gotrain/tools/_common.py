@@ -62,7 +62,9 @@ def _budget_for_call(signature: inspect.Signature, args: tuple, kwargs: dict) ->
         bound = signature.bind_partial(*args, **kwargs).arguments
     except TypeError:
         return None
-    task = bound.get("task") or task_from_run_id(bound.get("run_id"))
+    run_ids = bound.get("run_ids")
+    first_run = run_ids[0] if isinstance(run_ids, list) and run_ids else bound.get("run_id")
+    task = bound.get("task") or task_from_run_id(first_run)
     return budget_status(task) if isinstance(task, str) else None
 
 

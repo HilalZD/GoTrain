@@ -15,7 +15,6 @@ from gotrain.contracts import TestRecord
 from gotrain.engine import get_engine
 from gotrain.tools._common import (
     error,
-    find_entry,
     git_commit,
     now_utc,
     read_json,
@@ -23,7 +22,7 @@ from gotrain.tools._common import (
     tool,
     write_json,
 )
-from gotrain.tools.registry import list_versions, load_version, version_key
+from gotrain.tools.registry import list_versions, load_version, version_checkpoints
 from gotrain.vault import append_ledger, ledger_entries, real_test_problem
 
 
@@ -57,10 +56,12 @@ def final_test(task: str, version: str) -> dict:
             f"no registered version {version!r} for {task}",
             f"Registered versions: {list_versions(task) or 'none - call register_model first'}.",
         )
-    entry = find_entry(mv.run_id)
-    if entry is None or not entry.get("checkpoint"):
-        return error(f"cannot locate the checkpoint of {version}", "This is a registry bug.")
-    checkpoint = storage().local_path(version_key(task, version)) / entry["checkpoint"]
+    checkpoints = version_checkpoints(mv)
+    if checkpoints is None:
+        return error(f"cannot locate the checkpoints of {version}", "This is a registry bug.")
+    # Exactly the model chosen on VALIDATION: one checkpoint or the ensemble, TTA as registered.
+    checkpoint = checkpoints[0] if len(checkpoints) == 1 else checkpoints
+    tta = {"tta": True} if mv.tta else {}  # only passed when set, so v1 engines keep working
 
     real = get_settings().engine == "real"
     lock = {"task": task, "version": version, "timestamp": now_utc().isoformat()}
@@ -68,7 +69,7 @@ def final_test(task: str, version: str) -> dict:
     if real:
         append_ledger(task, "started", version=version)
     try:
-        out = get_engine().evaluate(task, checkpoint, split="test")
+        out = get_engine().evaluate(task, checkpoint, split="test", **tta)
     except Exception as exc:  # keep the lock: the test set may already have been read
         failed = {"status": "failed", **lock, "error": f"{type(exc).__name__}: {exc}"}
         write_json(lock_key(task), failed)
@@ -90,4 +91,5 @@ def final_test(task: str, version: str) -> dict:
     write_json(lock_key(task), {"status": "done", **record.model_dump(mode="json")})
     if real:
         append_ledger(task, "done", **record.model_dump(mode="json", exclude={"task"}))
-    return {**record.model_dump(mode="json"), "val_score": mv.val_score, "locked": True}
+    model = {"members": mv.members, "tta": mv.tta}
+    return {**record.model_dump(mode="json"), **model, "val_score": mv.val_score, "locked": True}

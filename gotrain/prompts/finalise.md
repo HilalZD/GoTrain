@@ -10,6 +10,8 @@ what was learned.
 2. **Call `final_test` exactly once** with that task and version. The test set can be scored
    only once per task. If it refuses because the task was already tested, report the locked
    result and do not try again.
+   A version may be an ensemble and/or use test-time augmentation; `final_test` scores it
+   exactly as registered (the same members and TTA flag chosen on validation).
 3. **Write 2–5 lessons** with `write_lesson`. Each lesson is one concrete, reusable finding
    with its evidence (validation scores), useful for a *different* task with similar data.
    Tag each lesson with:

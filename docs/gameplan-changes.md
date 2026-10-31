@@ -235,7 +235,7 @@ tested on the fake engine; **partial** = groundwork exists; **planned** = not st
 
 | Feature | Status |
 |---|---|
-| Ensemble of top checkpoints + flip/rot90 test-time augmentation, chosen on validation | partial: engine contract v2 (`evaluate`/`predict` take a list of checkpoints and `tta`); selection tool planned |
+| Ensemble of top checkpoints + flip/rot90 test-time augmentation, chosen on validation | done: `evaluate_candidates` (tune), ensemble registration, `final_test` scores the registered members + TTA |
 | Agent knows the published GEO-Bench best score per task | planned |
 | Forecast-driven halving (learning-curve extrapolation) | planned (successive halving done) |
 | Enforced visual self-diagnosis | done (error grid + ObservationGate) |
@@ -360,7 +360,7 @@ Full spec for the real engine: `docs/contract-v2.md`. Backward compatible with v
 - `inspect_dataset` returns the task's `targets` (with `best_reference` and a note that these
   are test numbers while the agent sees validation scores). The tune prompt uses them:
   far below (> ~3 points) explore more; in between exploit; within ~1 point or above stop
-  exploring and spend the rest on seed checks (and ensembles/TTA once those tools exist).
+  exploring and spend the rest on seed checks, then ensembles/TTA (`evaluate_candidates`).
 - **Sources:** m-brick-kiln, m-pv4ger-seg, m-chesapeake and the MoCo ResNet50 m-eurosat
   number come from the Prithvi-EO-2.0 paper appendix, Tables A1-A4 (arXiv 2412.02732);
   m-eurosat 0.986 from the TerraFM paper (arXiv 2506.06281).
@@ -391,3 +391,37 @@ after the contract checks and the full local suite passed; the GPU suite re-runs
 - **New request #11** (to Serena): `describe_dataset` should compute
   `majority_class_baseline` and a per-class flat-tile fraction, so data shortcuts appear in
   the card the agent reads.
+
+## Ensembles and test-time augmentation (after the first real m-eurosat run)
+
+The first real-engine agent run on m-eurosat reached 0.9857 ± 0.0006 val in 17 min and
+stopped with 3 min left. Leftover budget can now buy ensembles and TTA, chosen on
+VALIDATION only.
+
+- **`evaluate_candidates(task, candidates)`** (tune phase). A candidate is
+  `{"run_ids": [1-4 runs], "tta": bool}`; at most 6 per call. Members must be "ok" runs of
+  the task; any invalid candidate rejects the whole call before anything runs. Each candidate
+  is scored by `engine.evaluate(checkpoint list, split="val", tta=...)`; the single best run
+  without TTA is always scored too, as the baseline. Returns a ranked table (members, TTA,
+  val score, `delta_vs_single_best`, `ties_with_top`), the seed noise used, and a
+  `recommended` pick.
+- **Budget.** An up-front estimate (val images x members x views at each member's img_size,
+  priced at training speed per image, so on the safe side; TTA = 8 views) must fit the
+  remaining budget. Real runs are charged the measured inference time; the fake engine is
+  charged the estimate (it scores instantly, like its simulated training time).
+- **Rules** (prompt and tool description): only once the score is in the target zone or
+  exploration is done; compare single best ± TTA and the top-2 and top-3 ensembles ± TTA;
+  **on a tie within the measured seed noise (the largest std from `confirm_seeds`), choose
+  the simpler candidate: fewer members first, then no TTA** (`recommended` applies this;
+  without a seed check only exact ties count); **at most 2 calls per session**, enforced by
+  the `SelectionQuota` hook in `gotrain/agent.py` (calls that returned an error don't count),
+  to limit selection overfitting on validation.
+- **Every result is stored** in `registry/<task>/candidates.jsonl`.
+- **`register_model(run_ids=[...], tta=...)`** registers an ensemble and/or TTA model, but only
+  one scored by `evaluate_candidates` with exactly those members and flag; its measured val
+  score is registered. Member folders are copied to `registry/<task>/vN/members/<run_id>/`;
+  `ModelVersion` gains `members` (best first; `run_id` and `config` are the best member's) and
+  `tta`, and the model card lists the members. `register_model(run_id)` works as before
+  (old versions load with `members=[run_id]`, `tta=false`).
+- **`final_test`** passes the registered checkpoint list and TTA flag to `engine.evaluate`
+  (a single checkpoint without TTA is called exactly as before).

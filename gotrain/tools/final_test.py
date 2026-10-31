@@ -26,6 +26,46 @@ from gotrain.tools._common import (
 from gotrain.tools.registry import list_versions, load_version, version_checkpoints
 from gotrain.vault import append_ledger, ledger_entries, real_test_problem
 
+REHEARSAL_LABEL = "REHEARSAL (val)"
+
+
+def rehearsal_key(task: str) -> str:
+    return f"registry/{task}/REHEARSAL.json"
+
+
+def rehearse(task: str, version: str) -> dict:
+    """The whole finalise path on split="val": no TEST_LOCK, no ledger, any home."""
+    mv = load_version(task, version)
+    if mv is None:
+        return error(
+            f"no registered version {version!r} for {task}",
+            f"Registered versions: {list_versions(task) or 'none - call register_model first'}.",
+        )
+    checkpoints = version_checkpoints(mv)
+    if checkpoints is None:
+        return error(f"cannot locate the checkpoints of {version}", "This is a registry bug.")
+    checkpoint = checkpoints[0] if len(checkpoints) == 1 else checkpoints
+    tta = {"tta": True} if mv.tta else {}
+    out = get_engine().evaluate(task, checkpoint, split="val", **tta)
+    try:
+        ci = bootstrap_ci(task_type_of(task), out.get("per_sample") or {}) or {}
+    except Exception:  # noqa: BLE001
+        ci = {}
+    record = TestRecord(
+        task=task,
+        version=version,
+        test_score=out["score"],
+        metric_name=out["metric_name"],
+        git_commit=git_commit(),
+        timestamp=now_utc(),
+        **ci,
+    )
+    marked = {"rehearsal": REHEARSAL_LABEL, "split": "val", **record.model_dump(mode="json")}
+    write_json(rehearsal_key(task), marked)
+    append_card_result(task, version, record, rehearsal=True)
+    model = {"members": mv.members, "tta": mv.tta}
+    return {**marked, **model, "val_score": mv.val_score, "locked": False}
+
 
 def lock_key(task: str) -> str:
     return f"registry/{task}/TEST_LOCK.json"
@@ -41,14 +81,17 @@ def ci_text(record: TestRecord) -> str:
     return f"[{record.ci_low:.4f}, {record.ci_high:.4f}] ({record.ci_level:.0%} bootstrap CI)"
 
 
-def append_card_result(task: str, version: str, record: TestRecord) -> None:
+def append_card_result(
+    task: str, version: str, record: TestRecord, rehearsal: bool = False
+) -> None:
     """Add the test result to the version's model card (best effort: the lock is the record)."""
     key = f"registry/{task}/{version}/model_card.md"
     try:
         card = storage().read_text(key)
         section = (
-            "\n## Test result\n\n"
-            f"- Test {record.metric_name}: **{record.test_score:.4f}**\n"
+            f"\n## {REHEARSAL_LABEL if rehearsal else 'Test result'}\n\n"
+            f"- {'Val' if rehearsal else 'Test'} {record.metric_name}: "
+            f"**{record.test_score:.4f}**\n"
             f"- 95% CI: {ci_text(record)}\n"
             f"- Scored: {record.timestamp.isoformat()}\n"
         )
@@ -65,6 +108,8 @@ def final_test(task: str, version: str) -> dict:
         task: GEO-Bench task name.
         version: Registered version to score, e.g. "v2".
     """
+    if get_settings().rehearsal:
+        return rehearse(task, version)
     if storage().exists(lock_key(task)):
         return error(
             f"the test set for {task} has already been used; it can only be scored once",

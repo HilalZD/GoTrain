@@ -315,6 +315,11 @@ def kickoff_message(task: str, phase: Phase, max_tool_calls: int | None = None) 
     if phase == "tune":
         lines.append("Start with your BUDGET PLAN, then inspect the dataset and read lessons.")
     else:
+        if get_settings().rehearsal:
+            lines.append(
+                "REHEARSAL (val): final_test scores VALIDATION, not the test set. Label everything "
+                "you write as a rehearsal."
+            )
         lines.append("Registered versions (validation scores):")
         for version in list_versions(task):
             mv = load_version(task, version)

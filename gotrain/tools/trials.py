@@ -169,6 +169,9 @@ def _execute_trial(
         "minutes": round(result.minutes_used, 3),
         "budget_minutes": budget_minutes,
         "epochs": len(result.history),
+        "minutes_per_epoch": (
+            round(result.minutes_used / len(result.history), 3) if result.history else None
+        ),
         "max_epochs": config.max_epochs,
         "config": summarize_config(config),
         "reason": short_reason(config.reason),

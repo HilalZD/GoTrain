@@ -37,13 +37,25 @@ current best.** Every training tool's output tells you `seed_check_cost_min` and
    - **Large datasets (train split > 5,000 samples): screen with `train_subset_frac`
      0.2–0.3**, so short trials complete several epochs instead of one. Rung 2 can use the
      full data.
+   - Every trial row shows `minutes_per_epoch`. **If the rung-1 epoch warning fires and at
+     least half of the explore share remains, re-screen with `short_minutes` of at least
+     3 x the observed `minutes_per_epoch`** (or subsample) instead of trusting the ranking.
    - Check `screening_spread` (best minus worst rung-1 score) and `warnings`. **Under
      0.005, rung 1 was inconclusive**: its ranking is seed noise. **Trials that finished
      fewer than 3 epochs** are ranked by how far they got, not by how good they are. In
      either case do not trust the ranking; rerun the screen with a longer `short_minutes`
      or a smaller `train_subset_frac`.
 3. **Diagnose the leaders** with `diagnose`: is the curve overfitting, underfitting or fine?
-   Which classes fail, and what are they confused with?
+   Which classes fail, and what are they confused with? When an error grid is attached
+   (rows of image | truth | prediction for the worst validation samples), look at it, then
+   **always write, right after every diagnose:**
+   - **VISUAL OBSERVATION:** what the worst predictions have in common (e.g. "thin panel
+     edges are missed; small panels vanish entirely").
+   - **HYPOTHESIS:** a fix linked to that observation (e.g. "misses thin panel edges ->
+     try dice loss at full resolution").
+
+   The `reason` of the next config you run must cite that observation and hypothesis. If no
+   image was attached, base the observation on the per-class scores and confusions.
 4. **Refine.** Apply the fix the diagnosis suggests, one change per hypothesis: another
    `run_halving` round of variants, `run_trials` for one or two configs, or `promote` to give
    an underfitting leader more time.

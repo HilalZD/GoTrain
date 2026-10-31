@@ -10,7 +10,9 @@ Every line has: ts (UTC), session_id, task, phase, event. Events:
     tool_call                     name, args, result summary, duration_s, status, error
     trial                         one per trial a tool ran (its "trials" rows): run_id, rung,
                                   parent, seed_group, status, val_score, minutes
-    model_error                 a failed Bedrock call (it may be retried)
+    image_shown                   an image a tool showed the model: path, size, dimensions
+                                  (never the image bytes)
+    model_error                   a failed Bedrock call (it may be retried)
 
 Named audit.py (not logging.py) so it never shadows the stdlib logging module.
 """
@@ -152,6 +154,33 @@ class AuditLog(HookProvider):
             f"   - result: `{truncate(text, MAX_JOURNAL_CHARS)}`"
         )
         self._log_trials(tool_use["name"], text)
+        self._log_images(tool_use["name"], result, text)
+
+    def _log_images(self, tool_name: str, result: dict, text: str) -> None:
+        """Record that an image was shown, from its metadata only; bytes are never logged."""
+        images = [block["image"] for block in result.get("content", []) if "image" in block]
+        if not images:
+            return
+        try:
+            meta = json.loads(text).get("error_grid") or {}
+        except (ValueError, AttributeError):
+            meta = {}
+        for image in images:
+            size = len(image.get("source", {}).get("bytes", b""))
+            self.log(
+                "image_shown",
+                tool=tool_name,
+                format=image.get("format"),
+                size_bytes=size,
+                path=meta.get("key"),
+                source_path=meta.get("source_path"),
+                width=meta.get("width"),
+                height=meta.get("height"),
+            )
+            self.journal(
+                f"   - image shown: `{meta.get('key')}` "
+                f"({meta.get('width')}x{meta.get('height')} px, {size // 1024} KB)"
+            )
 
     def _log_trials(self, tool_name: str, text: str) -> None:
         """One untruncated `trial` event per row of a tool's "trials" list."""

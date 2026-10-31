@@ -43,6 +43,12 @@ class Storage(ABC):
     def append_text(self, key: str, text: str) -> None: ...
 
     @abstractmethod
+    def read_bytes(self, key: str) -> bytes: ...
+
+    @abstractmethod
+    def write_bytes(self, key: str, data: bytes) -> None: ...
+
+    @abstractmethod
     def local_path(self, key: str) -> Path:
         """A local directory for `key` that an engine can write into."""
 
@@ -108,6 +114,14 @@ class LocalBackend(Storage):
         with path.open("a", encoding="utf-8") as f:
             f.write(text)
 
+    def read_bytes(self, key: str) -> bytes:
+        return self._path(key).read_bytes()
+
+    def write_bytes(self, key: str, data: bytes) -> None:
+        path = self._path(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+
     def local_path(self, key: str) -> Path:
         path = self._path(key)
         path.mkdir(parents=True, exist_ok=True)
@@ -149,6 +163,12 @@ class S3Backend(Storage):
         raise self._todo()
 
     def append_text(self, key: str, text: str) -> None:
+        raise self._todo()
+
+    def read_bytes(self, key: str) -> bytes:
+        raise self._todo()
+
+    def write_bytes(self, key: str, data: bytes) -> None:
         raise self._todo()
 
     def local_path(self, key: str) -> Path:

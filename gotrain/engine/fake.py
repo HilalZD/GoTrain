@@ -11,6 +11,9 @@ import random
 import time
 from pathlib import Path
 
+import numpy as np
+from PIL import Image, ImageDraw
+
 from gotrain.contracts import DatasetCard, EpochRecord, TrainConfig, TrainResult
 from gotrain.engine.combos import check_combo
 
@@ -262,6 +265,88 @@ def fake_confusion(
     return per_class, matrix
 
 
+ERROR_GRID_NAME = "diagnostics/error_grid.png"
+GRID_ROWS = 4
+TILE = 128
+GAP = 4  # white gutter between tiles
+LABEL_H = 16
+PALETTE = [
+    (31, 119, 180), (255, 127, 14), (44, 160, 44), (214, 39, 40), (148, 103, 189),
+    (140, 86, 75), (227, 119, 194), (127, 127, 127), (188, 189, 34), (23, 190, 207),
+]  # fmt: skip
+
+
+def worst_pairs(matrix: list[list[float]], n: int) -> list[tuple[int, int]]:
+    """The n (true, predicted) class pairs with the highest confusion rates, cycled if few."""
+    pairs = sorted(
+        ((i, j) for i, row in enumerate(matrix) for j in range(len(row)) if i != j),
+        key=lambda ij: -matrix[ij[0]][ij[1]],
+    )
+    return [pairs[k % len(pairs)] for k in range(n)]
+
+
+def _noise_tile(rng: np.random.Generator, tint: tuple[int, int, int]) -> np.ndarray:
+    base = np.array(tint, dtype=float) * 0.6 + rng.normal(0, 25, (TILE, TILE, 3))
+    return base.clip(0, 255).astype(np.uint8)
+
+
+def _classification_tiles(
+    true: int, pred: int, rng: np.random.Generator, card: DatasetCard
+) -> list[np.ndarray]:
+    def solid(c: int) -> np.ndarray:
+        return np.full((TILE, TILE, 3), PALETTE[c % len(PALETTE)], dtype=np.uint8)
+
+    return [_noise_tile(rng, PALETTE[true % len(PALETTE)]), solid(true), solid(pred)]
+
+
+def _segmentation_tiles(
+    true: int, pred: int, rng: np.random.Generator, card: DatasetCard
+) -> list[np.ndarray]:
+    """Thin objects of the rarer class on the commoner one.
+
+    If the rare class is the true one, the prediction misses edges or whole objects;
+    otherwise it adds a spurious object (a false positive).
+    """
+    freq = card.class_distribution
+    obj, bg = sorted((true, pred), key=lambda c: freq.get(card.class_names[c], 0.0))
+    truth = np.full((TILE, TILE), bg)
+    predicted = truth.copy()
+    for _ in range(4):
+        y, x = rng.integers(8, TILE - 24, size=2)
+        h, w = rng.integers(4, 9), rng.integers(16, 40)
+        truth[y : y + h, x : x + w] = obj
+        if obj != true or rng.random() < 0.6:  # rare-class misses: some objects vanish
+            shrink = (1, 3) if obj == true else (0, 0)  # and the kept ones lose their edges
+            predicted[y + shrink[0] : y + h - shrink[0], x + shrink[1] : x + w - shrink[1]] = obj
+    if obj != true:
+        y, x = rng.integers(8, TILE - 24, size=2)
+        predicted[y : y + 6, x : x + 30] = obj  # false positive
+    image = _noise_tile(rng, (110, 110, 110))
+    image[truth == obj] = (image[truth == obj] * 0.4 + 140).astype(np.uint8)
+    colours = np.array(PALETTE * 2, dtype=np.uint8)
+    return [image, colours[truth % len(PALETTE)], colours[predicted % len(PALETTE)]]
+
+
+def draw_error_grid(card: DatasetCard, matrix: list[list[float]], seed: int, path: Path) -> Path:
+    """Synthetic error grid: rows of image | truth | prediction for the worst confusions."""
+    rng = np.random.default_rng(seed % 2**32)
+    width = 3 * TILE + 2 * GAP
+    canvas = Image.new("RGB", (width, LABEL_H + GRID_ROWS * (TILE + LABEL_H)), "white")
+    draw = ImageDraw.Draw(canvas)
+    for col, title in enumerate(("image", "truth", "prediction")):
+        draw.text((col * (TILE + GAP) + 4, 2), title, fill="black")
+    tiles = _segmentation_tiles if card.task_type == "segmentation" else _classification_tiles
+    for row, (true, pred) in enumerate(worst_pairs(matrix, GRID_ROWS)):
+        y = LABEL_H + row * (TILE + LABEL_H)
+        for col, tile in enumerate(tiles(true, pred, rng, card)):
+            canvas.paste(Image.fromarray(tile), (col * (TILE + GAP), y))
+        names = card.class_names
+        draw.text((4, y + TILE + 2), f"true {names[true]} -> pred {names[pred]}", fill="black")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    canvas.save(path)
+    return path
+
+
 def curve_verdict(history: list[EpochRecord]) -> str:
     """'overfitting' if val peaked early and fell; 'underfitting' if still climbing."""
     scores = [h.val_score or 0.0 for h in history]
@@ -355,7 +440,9 @@ class FakeEngine:
             "per_class": per_class,
             "confusion_matrix": matrix,
             "curve_verdict": curve_verdict(history),
-            "error_grid_path": None,
+            "error_grid_path": str(
+                draw_error_grid(card, matrix, ckpt["seed"], Path(run_dir) / ERROR_GRID_NAME)
+            ),
         }
 
     @staticmethod

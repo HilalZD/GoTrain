@@ -16,6 +16,9 @@ dependencies = [
     "boto3",
     "mcp",
     "rich",
+    # unpinned so an install never replaces the instance's versions (numpy 2.5.4)
+    "numpy",
+    "pillow",
 ]
 
 [project.optional-dependencies]

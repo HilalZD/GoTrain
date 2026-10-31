@@ -40,7 +40,7 @@ INCONCLUSIVE_WARNING = (
     "rung 1 was inconclusive; consider a longer short_minutes or train_subset_frac"
 )
 MIN_SCREENING_EPOCHS = 3  # fewer, and rung-1 scores mostly reflect how far training got
-HALVING_ROW_KEYS = ("rung", "parent")
+HALVING_ROW_KEYS = ("rung", "parent", "minutes_per_epoch")
 
 
 def _original_reason(reason: str) -> str:
@@ -66,11 +66,16 @@ def screening_summary(rung1: list[dict]) -> dict:
 def few_epochs_warning(short: list[dict]) -> str:
     runs = ", ".join(f"{e['run_id']} ({e['epochs']})" for e in short)
     fewest = min(e["epochs"] for e in short)
-    return (
+    message = (
         f"rung 1 trials finished only {fewest} epochs; screening is unreliable. "
         f"Use train_subset_frac 0.2–0.3 or a longer short_minutes. "
-        f"Runs (epochs): {runs}"
+        f"Runs (epochs): {runs}."
     )
+    per_epoch = [e["minutes_per_epoch"] for e in short if e.get("minutes_per_epoch")]
+    if per_epoch:
+        needed = MIN_SCREENING_EPOCHS * max(per_epoch)
+        message += f" At this setting 3 epochs need short_minutes >= {needed:.1f}."
+    return message
 
 
 def _affordability_hint(remaining: float, n: int, short: float, long: float, keep: int) -> str:

@@ -19,9 +19,9 @@ Four GEO-Bench tasks:
 | `m-eurosat` | classification | Sentinel-2 |
 | `m-brick-kiln` | classification | Sentinel-2 |
 | `m-pv4ger-seg` | segmentation | aerial RGB |
-| `m-chesapeake-landcover` ("m-chesapeake") | segmentation | NAIP RGBN |
+| `m-chesapeake-landcover` | segmentation | NAIP RGBN |
 
-We say "m-chesapeake" for short. In code we use GEO-Bench's full name, `m-chesapeake-landcover`.
+We always use GEO-Bench's full name, `m-chesapeake-landcover`, never a short form.
 
 ## Pretrained weights
 
@@ -133,3 +133,32 @@ trial finished only one epoch of the 15k-sample train split.
 - **Fake engine.** Epoch time scales with `train_subset_frac`, so a 0.25 subsample fits ~4x
   the epochs in the same minutes; its reachable score is capped slightly lower
   (3 points x (1 - frac)). Deterministic as before.
+
+## Visual diagnostics: the error grid
+
+- **Engine contract.** `diagnose(task, run_dir)` may return `error_grid_path`: a PNG with
+  rows of image | truth | prediction for the worst validation samples. The fake engine draws
+  a synthetic one (numpy + PIL) into `<run_dir>/diagnostics/error_grid.png`, so the loop works
+  before the real diagnostics land.
+- **Only `diagnose` shows images.** The tool downscales the grid to at most 1024 px on the
+  long side and under ~1 MB (`gotrain/images.py`), saves it as
+  `diagnostics/error_grid_for_model.png` in the run folder, and returns metadata only. Its
+  agent adapter (`diagnose_for_model`) sends the JSON summary as a text block plus the PNG as
+  an image block. If the file is missing or unreadable, the agent gets text only with an
+  `image_note`. A rule test fails if any other module builds an image block.
+- **Strands 1.63.0 detail.** A tool result is `{"status", "content": [...]}`; an image block is
+  `{"image": {"format": "png", "source": {"bytes": ...}}}` (raw bytes). The Bedrock provider
+  keeps only `content`, `toolUseId` and `status`, so all other data (including `budget`)
+  must live inside the text block.
+- **Audit.** An `image_shown` event records path, size and dimensions. Image bytes are never
+  logged.
+- **Prompt.** After every diagnose the agent writes a **VISUAL OBSERVATION** (what the worst
+  predictions have in common) and a linked **HYPOTHESIS**, and the next config's reason must
+  cite them.
+
+## Re-screening on the epoch warning
+
+`run_halving` rows include `minutes_per_epoch`. If the rung-1 epoch warning fires and at least
+half of the explore share remains, the agent re-screens with `short_minutes` of at least
+3 x the observed `minutes_per_epoch` (the warning states that number) instead of trusting the
+ranking.

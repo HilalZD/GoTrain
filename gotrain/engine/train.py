@@ -47,6 +47,7 @@ from gotrain.contracts import DatasetCard, EpochRecord, TrainConfig, TrainResult
 from gotrain.engine.combos import check_combo
 from gotrain.engine.data import (
     IGNORE_INDEX,
+    NODATA_CLASSES,
     TEST_SPLIT,
     GeoBenchDataset,
     describe_dataset,
@@ -370,6 +371,31 @@ def miou_from_confusion(confusion: np.ndarray) -> float:
     return float(np.nanmean(iou)) if np.isfinite(iou).any() else 0.0
 
 
+def miou_excluding(confusion: np.ndarray, nodata: int) -> float:
+    """Extra metric: mIoU over the other classes, with pixels whose TRUTH is `nodata` removed.
+
+    Pixels of real classes predicted as `nodata` still count as errors for their true class.
+    Not the official score (that keeps every class); reported next to it as miou_excl_nodata.
+    """
+    keep = [c for c in range(confusion.shape[0]) if c != nodata]
+    cm = np.delete(confusion, nodata, axis=0)  # drop no-data truth rows
+    tp = np.array([cm[i, c] for i, c in enumerate(keep)], dtype=np.float64)
+    union = cm.sum(axis=1) + cm[:, keep].sum(axis=0) - tp
+    present = union > 0
+    return float(np.mean(tp[present] / union[present])) if present.any() else 0.0
+
+
+def nodata_extras(task: str, confusion: np.ndarray | None) -> dict:
+    """{"miou_excl_nodata", "nodata_class"} for tasks with a no-data class, else {}."""
+    nodata = NODATA_CLASSES.get(task)
+    if nodata is None or confusion is None:
+        return {}
+    return {
+        "miou_excl_nodata": round(miou_excluding(confusion, nodata), 5),
+        "nodata_class": nodata,
+    }
+
+
 def micro_f1(y_true: np.ndarray, probs: np.ndarray, threshold: float = 0.5) -> float:
     pred = probs > threshold
     true = y_true > 0.5
@@ -681,6 +707,7 @@ def _train(
             "epochs_run": len(history),
             "full_epochs": full_epochs,
             "stop_reason": stop_reason,
+            **nodata_extras(config.task, (best["preds"] or {}).get("confusion")),
             "minutes_used": round(minutes, 3),
             "budget_minutes": budget_minutes,
             "n_train": len(train_ds),

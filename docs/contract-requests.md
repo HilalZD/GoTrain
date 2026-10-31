@@ -94,7 +94,7 @@ Each entry: what, why, and the smallest change that would do it.
   ever used.
 
 
-## 9. m-chesapeake: ignore class 0 "no data"? (changes the reported mIoU; Serena to decide)
+## 9. m-chesapeake: ignore class 0 "no data"? DECIDED (Serena, 2026-10-31): no, extra metric only
 
 - **Verified:** class 0 is "no data", not land cover. GEO-Bench's converter reads the masks
   through TorchGeo's `ChesapeakeCVPRDataModule(class_set=7)`, which keeps the raw Chesapeake
@@ -107,9 +107,13 @@ Each entry: what, why, and the smallest change that would do it.
   column in `per_sample` becomes all zeros (so v2's "classes with total union > 0" rule drops
   it), and no-data pixels no longer count in other classes' unions. The chesapeake mIoU becomes
   a 6-class mIoU, not comparable with a 7-class one or with the fake engine's.
-- **Not implemented yet.** Waiting for Serena's decision.
+- **Decision: no.** `score` stays the official 7-class mIoU (comparable with GEO-Bench
+  baselines; no contract change) and training uses all 7 classes. Extra, clearly labelled
+  number: `miou_excl_nodata` (6 classes, pixels whose truth is class 0 removed; real pixels
+  predicted as class 0 still count as errors) in `metrics.json` and in `diagnose()`'s output,
+  driven by `NODATA_CLASSES` in `gotrain/engine/data.py`. Nothing changes for the tools.
 
-## 10. Task name: `m-chesapeake` on disk vs `m-chesapeake-landcover` in our docs
+## 10. Task name: `m-chesapeake` on disk vs `m-chesapeake-landcover` in our docs. DECIDED: `m-chesapeake`
 
 - GEO-Bench's Hugging Face zip is `segmentation_v1.0/m-chesapeake.zip` and it unzips into a
   folder named `m-chesapeake`; the task's own name is `m-chesapeake`. The real engine finds tasks
@@ -119,3 +123,5 @@ Each entry: what, why, and the smallest change that would do it.
   `m-chesapeake-landcover`", and `FakeEngine.CARDS` uses that key.
 - **Proposed:** use `m-chesapeake` everywhere (fake engine card, prompts, budgets). The engine
   could alternatively accept an alias, but one name is simpler to audit.
+- **Decision (Serena, 2026-10-31):** use `m-chesapeake`, the real folder name; Hilal switches the
+  fake engine card and docs.

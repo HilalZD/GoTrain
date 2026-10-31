@@ -78,6 +78,11 @@ CLASS_NAME_FIXES: dict[str, list[str]] = {
 
 # Facts measured by one-off checks outside inspect_task (data, not logic). describe_dataset()
 # adds them to the card's notes so they survive a re-run of scratch/explore.py.
+# Segmentation classes that mean "no data", not land cover (data, not logic). Training and the
+# official `score` keep ALL classes (comparable with GEO-Bench baselines; decision on
+# docs/contract-requests.md #9); metrics.json and diagnose() add `miou_excl_nodata` as an extra.
+NODATA_CLASSES: dict[str, int] = {"m-chesapeake": 0}
+
 DATASET_FACTS: dict[str, list[str]] = {
     "m-brick-kiln": [
         "Shortcut warning: almost-flat tiles (water, cloud, haze or fill; B04 2-98% spread < 50 "
@@ -89,7 +94,8 @@ DATASET_FACTS: dict[str, list[str]] = {
     ],
     "m-chesapeake": [
         "Class 0 'no data' marks blank tiles (125 whole train tiles; the imagery there is all "
-        "zero). It is not land cover; see docs/contract-requests.md #9 on ignoring it.",
+        "zero). It stays in training and in the official 7-class mIoU (score, comparable with "
+        "GEO-Bench); metrics.json and diagnose() also report miou_excl_nodata (6 classes).",
         "Masks have hand-drawn edges (e.g. straight barren polygons over grass): label noise "
         "caps the IoU reachable for barren, impervious other and roads.",
     ],

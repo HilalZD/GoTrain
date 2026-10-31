@@ -13,9 +13,10 @@ from collections.abc import Callable
 
 from pydantic import ValidationError
 
-from gotrain.agent import DEFAULT_MAX_TOOL_CALLS, build_agent, kickoff_message
+from gotrain.agent import DEFAULT_MAX_TOOL_CALLS, build_agent, kickoff_message, make_limit
 from gotrain.audit import AuditLog
 from gotrain.config import get_settings
+from gotrain.driver import run_session
 from gotrain.engine import get_engine
 from gotrain.storage import get_storage
 from gotrain.tools._common import git_commit
@@ -96,19 +97,20 @@ def run(args: argparse.Namespace, ask: Callable[[str], str] = input) -> int:
         max_tool_calls=max_calls,
         budget=budget_status(args.task),
     )
-    agent = build_agent(args.task, args.phase, audit=audit, max_tool_calls=max_calls)
+    limit = make_limit(args.phase, max_calls)
+    agent = build_agent(args.task, args.phase, audit=audit, limit=limit)
+    kickoff = kickoff_message(args.task, args.phase, max_calls)
     try:
-        result = agent(kickoff_message(args.task, args.phase, max_calls))
+        outcome = run_session(agent, audit, args.task, args.phase, kickoff, limit)
     except Exception as exc:
         audit.end(status="crashed", error=f"{type(exc).__name__}: {exc}")
         return fail(f"agent crashed: {exc} (see {audit.jsonl_key})")
-    usage = getattr(getattr(result, "metrics", None), "accumulated_usage", None)
-    audit.end(
-        status="finished",
-        stop_reason=str(result.stop_reason),
-        budget=budget_status(args.task),
-        usage=usage,
-    )
+    audit.end(status="finished", budget=budget_status(args.task), **outcome)
+    if outcome["registered_by"] == "harness":
+        print(
+            f"WARNING: the agent did not register a model; the harness auto-registered "
+            f"{outcome['version']} (see the journal)."
+        )
     print(f"Done. Audit log: {settings.home / audit.jsonl_key}")
     print(f"Journal:   {settings.home / audit.journal_key}")
     return 0

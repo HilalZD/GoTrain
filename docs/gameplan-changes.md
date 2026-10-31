@@ -197,3 +197,32 @@ epochs, wasting 9 min.
   m-brick-kiln 0.75, m-chesapeake-landcover 2.4, m-pv4ger-seg 3.75 (hint: subsample <= 0.15).
   **For the real engine the constant is a placeholder** until measured on the T4; observed
   `minutes_per_epoch` from trials beats the estimate.
+
+## Harness fix: sessions that ended early (second live m-pv4ger-seg run)
+
+After `diagnose`, the agent put its observation in a config's `reason`, was blocked 4
+times, then wrote VISUAL OBSERVATION + HYPOTHESIS as a text-only message ("I'm about to run
+them"). In Strands a text-only reply ends the agent loop, so the session finished with 26 of
+40 minutes unused and nothing registered.
+
+- **Gate message and tool-args acceptance.** The `ObservationGate` cancel text now says:
+  "write VISUAL OBSERVATION and HYPOTHESIS as plain text in your message AND include your
+  next tool call in the SAME response; do not end your turn." The gate also accepts the
+  observation when the blocked call's own arguments (e.g. a config `reason`) contain both
+  keywords. `observation_written` events record the `source` (`message` or `tool_args`).
+- **Continuations** (`gotrain/driver.py`, used by the CLI). When a tune session ends its
+  turn while budget remains above the cost of one short trial (the cheapest per-trial
+  budget used so far, or 2 min) and the agent has registered nothing in this session, the
+  driver sends "Continue your plan. Remaining budget: X min. Remember to finish with
+  register_model." Up to 3 per session, each a `continuation` audit event and a journal
+  line; a 4th is refused (`continuations_exhausted`). No continuation once the tool-call
+  limit has ended the loop, and none in the finalise phase.
+- **Registration safety net.** If a tune session ends with nothing registered in it but a
+  successful run exists, the driver registers the best run by validation (a seed group
+  counts by its mean, registered via its base run) with the notes "auto-registered by
+  harness: agent did not register", plus the basis. Audit event `auto_registered`; the
+  journal shows "HARNESS: AUTO-REGISTERED ... not chosen by the agent"; the CLI prints a
+  warning; `session_end` records `registered_by: "harness"`. If the best run is already
+  registered from an earlier session, nothing is duplicated (`auto_register_failed`).
+- **Prompt.** Never end a turn with a text-only reply while the plan and budget remain;
+  write observations in the same response as the next tool call.

@@ -52,7 +52,9 @@ current best.** Every training tool's output tells you `seed_check_cost_min` and
 3. **Diagnose the leaders** with `diagnose`: is the curve overfitting, underfitting or fine?
    Which classes fail, and what are they confused with? When an error grid is attached
    (rows of image | truth | prediction for the worst validation samples), look at it, then
-   **always write, right after every diagnose** (other tool calls are blocked until you do):
+   **always write, right after every diagnose**, as plain text in the same response as your
+   next tool call (other tool calls are blocked until you do; never send the observation
+   as a text-only reply, because that ends your turn):
    - **VISUAL OBSERVATION:** what the worst predictions have in common (e.g. "thin panel
      edges are missed; small panels vanish entirely").
    - **HYPOTHESIS:** a fix linked to that observation (e.g. "misses thin panel edges ->
@@ -81,6 +83,9 @@ current best.** Every training tool's output tells you `seed_check_cost_min` and
 # Rules
 
 - **State your reason before every tool call**, in one or two sentences.
+- **Never end your turn with a text-only reply while you still have a plan and budget.** A
+  reply without a tool call ends the session. Put your reasoning and the next tool call in
+  the same response. The session is only finished after `register_model`.
 - **One change per hypothesis when refining.** If you change lr and loss together, you
   cannot tell which one helped.
 - **End every round with two short headings:** "What I learned" and "What I'll try next".

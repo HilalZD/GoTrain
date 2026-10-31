@@ -8,6 +8,7 @@ Do not import strands_tools: it is preinstalled on SageMaker but incompatible.
 """
 
 import inspect
+import json
 from pathlib import Path
 from typing import Any, Literal, get_args, get_origin
 
@@ -90,6 +91,11 @@ class ToolCallLimit(HookProvider):
     def hard_limit(self) -> int:
         return self.max_calls + self.grace
 
+    @property
+    def exhausted(self) -> bool:
+        """True once the loop has been (or would be) ended for this session."""
+        return self.calls >= self.hard_limit
+
     def _before_tool(self, event: BeforeToolCallEvent) -> None:
         self.calls += 1
         if self.calls <= self.max_calls:
@@ -108,11 +114,12 @@ class ToolCallLimit(HookProvider):
 
 
 class ObservationGate(HookProvider):
-    """After a successful diagnose, cancel every tool call until the agent has written an
-    assistant message containing both "VISUAL OBSERVATION" and "HYPOTHESIS".
+    """After a successful diagnose, cancel every tool call until the agent has written both
+    "VISUAL OBSERVATION" and "HYPOTHESIS".
 
-    Writing them in the same message as the next tool call counts: Strands adds the
-    assistant message before running its tools. Every block is an audit event.
+    Accepted in an assistant message (Strands adds the message before running its tools,
+    so text plus tool call in one response works) or in the next tool call's own arguments,
+    e.g. a config's reason. Every block and every release is an audit event.
     """
 
     def __init__(self, audit: AuditLog):
@@ -135,22 +142,26 @@ class ObservationGate(HookProvider):
         message = event.message
         if self.pending_run is None or message.get("role") != "assistant":
             return
-        text = "\n".join(block.get("text", "") for block in message.get("content", [])).upper()
-        if all(marker in text for marker in OBSERVATION_MARKERS):
-            self.audit.log("observation_written", diagnosed_run=self.pending_run)
-            self.pending_run = None
+        text = "\n".join(block.get("text", "") for block in message.get("content", []))
+        if has_observation(text):
+            self._release("message")
 
     def _before_tool(self, event: BeforeToolCallEvent) -> None:
         if self.pending_run is None:
             return
+        if has_observation(json.dumps(event.tool_use.get("input", {}))):
+            self._release("tool_args")
+            return
         name = event.tool_use["name"]
         event.cancel_tool = (
             f"Blocked: you diagnosed {self.pending_run} but have not written your observation. "
-            "Before any other tool call, write a message containing:\n"
+            "Write VISUAL OBSERVATION and HYPOTHESIS as plain text in your message AND include "
+            "your next tool call in the SAME response; do not end your turn.\n"
             "VISUAL OBSERVATION: what the worst predictions have in common (from the error "
             "grid, or from the per-class scores and confusions if no image was shown).\n"
             "HYPOTHESIS: the fix that observation suggests.\n"
-            f"Then call {name} again; the next config's reason must cite them."
+            f"Then call {name} again in that same response; the next config's reason must "
+            "cite them."
         )
         self.audit.log(
             "observation_enforced",
@@ -158,6 +169,15 @@ class ObservationGate(HookProvider):
             tool_use_id=event.tool_use["toolUseId"],
             diagnosed_run=self.pending_run,
         )
+
+    def _release(self, source: str) -> None:
+        self.audit.log("observation_written", diagnosed_run=self.pending_run, source=source)
+        self.pending_run = None
+
+
+def has_observation(text: str) -> bool:
+    upper = text.upper()
+    return all(marker in upper for marker in OBSERVATION_MARKERS)
 
 
 def load_prompt(phase: Phase) -> str:
@@ -208,6 +228,10 @@ def build_model(settings: Settings) -> BedrockModel:
     )
 
 
+def make_limit(phase: Phase, max_tool_calls: int | None = None) -> ToolCallLimit:
+    return ToolCallLimit(max_tool_calls or DEFAULT_MAX_TOOL_CALLS[phase], WRAP_UP_TOOLS[phase])
+
+
 def build_agent(
     task: str,
     phase: Phase,
@@ -215,11 +239,16 @@ def build_agent(
     audit: AuditLog | None = None,
     max_tool_calls: int | None = None,
     model: Model | None = None,
+    limit: ToolCallLimit | None = None,
 ) -> Agent:
-    """A ready-to-run agent for one task and phase. `model` is injectable for tests."""
+    """A ready-to-run agent for one task and phase.
+
+    `model` is injectable for tests; pass your own `limit` (see make_limit) to inspect it
+    after the session, as the driver does.
+    """
     if phase not in PHASE_TOOLS:
         raise ValueError(f"phase must be one of {sorted(PHASE_TOOLS)}, got {phase!r}")
-    limit = ToolCallLimit(max_tool_calls or DEFAULT_MAX_TOOL_CALLS[phase], WRAP_UP_TOOLS[phase])
+    limit = limit or make_limit(phase, max_tool_calls)
     audit = audit or AuditLog(task, phase)
     hooks: list[HookProvider] = [audit, limit]
     if phase == "tune":  # diagnose only exists in tune

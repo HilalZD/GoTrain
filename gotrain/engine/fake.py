@@ -166,6 +166,7 @@ SETUP_MINUTES = 0.2
 BEST_LOG10_LR = -3.3
 OVERFIT_START = 20  # epochs; runs without augmentation start losing val score after this
 OVERFIT_RATE = 0.0015
+SUBSET_PENALTY = 0.03  # a 0.25 subsample caps the reachable score ~2 points lower
 SEED_NOISE_STD = 0.0025  # seed-to-seed spread of the final score: roughly +-0.3 points
 EPOCH_NOISE_STD = 0.002  # epoch-to-epoch wobble of the val curve
 
@@ -200,7 +201,7 @@ def target_score(config: TrainConfig, card: DatasetCard, rng: random.Random) -> 
     )
     score += sum(AUGMENT_BONUS[a] for a in config.augment)
     score -= min(0.3, 0.04 * (math.log10(config.lr) - BEST_LOG10_LR) ** 2)
-    score -= 0.06 * (1.0 - config.train_subset_frac)
+    score -= SUBSET_PENALTY * (1.0 - config.train_subset_frac)  # less data: lower ceiling
     if config.bands != "all" and len(config.bands) < 3:
         score -= 0.03
     config_offset = random.Random(config_seed(config, include_seed=False)).uniform(-0.005, 0.005)
@@ -208,6 +209,7 @@ def target_score(config: TrainConfig, card: DatasetCard, rng: random.Random) -> 
 
 
 def minutes_per_epoch(config: TrainConfig, card: DatasetCard) -> float:
+    """Epoch time scales with the samples seen, so a 0.25 subsample fits ~4x the epochs."""
     pixels = (config.img_size / 64) ** 2
     return card.split_sizes["train"] * config.train_subset_frac * pixels / 20000
 

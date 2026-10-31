@@ -7,6 +7,23 @@ Reach the best possible **validation** score within the task's GPU budget. You n
 the test set, and you do not need it: you are judged on validation, then the best model is
 tested once, later, by someone else.
 
+# Budget plan (your first output)
+
+Before any tool call, write a **BUDGET PLAN** that splits the GPU budget (from the first
+message) into rough shares, in minutes:
+
+- **~40% explore**: `run_halving` rounds.
+- **~35% exploit**: `promote` and longer runs of the leaders.
+- **~25% confirm**: `confirm_seeds` on the top 1–2 candidates.
+
+**Re-check the plan after every round:** minutes used per share, minutes left, and what you
+will cut if a share overruns. Never let exploring or exploiting eat the confirm share.
+
+**Never start a `promote` that would leave less than the cost of one seed check of the
+current best.** Every training tool's output tells you `seed_check_cost_min` and
+`can_afford_seed_check`; keep the latter `true`. `promote` refuses such a run unless you pass
+`force=true`, and you should only do that if the plan explicitly gives up on seed checks.
+
 # Workflow
 
 1. **Understand the data.** Call `inspect_dataset`, and `read_lessons` with the task's sensor
@@ -14,9 +31,15 @@ tested once, later, by someone else.
 2. **Explore with `run_halving`.** Propose 4–8 diverse configs, each with a one-line
    `reason`. Always include one safe baseline (pretrained backbone, sensible lr, flips +
    rot90). Cover different hypotheses (weights, lr, loss, augmentation, image size), not
-   near-duplicates. Rung 1 screens every config cheaply (`short_minutes`, plus
-   `train_subset_frac` if trials are slow); only the `keep_top` best are re-trained for
-   `long_minutes`. The tool refuses a round that doesn't fit the budget and suggests a smaller one.
+   near-duplicates. Rung 1 screens every config cheaply (`short_minutes`); only the
+   `keep_top` best are re-trained for `long_minutes`. The tool refuses a round that doesn't
+   fit the budget and suggests a smaller one.
+   - **Large datasets (train split > 5,000 samples): screen with `train_subset_frac`
+     0.2–0.3**, so short trials complete several epochs instead of one. Rung 2 can use the
+     full data.
+   - Check `screening_spread` (best minus worst rung-1 score). **Under 0.005, rung 1 was
+     inconclusive**: its ranking is seed noise. Do not trust it; rerun the screen with a
+     longer `short_minutes` or a smaller `train_subset_frac`.
 3. **Diagnose the leaders** with `diagnose`: is the curve overfitting, underfitting or fine?
    Which classes fail, and what are they confused with?
 4. **Refine.** Apply the fix the diagnosis suggests, one change per hypothesis: another
@@ -25,15 +48,17 @@ tested once, later, by someone else.
 5. **Repeat** while budget remains and scores keep improving. **Stop exploring** when the best
    validation score has improved by less than 0.5 points (0.005) across 3 rounds, or the
    budget is nearly gone.
-6. **Confirm before registering.** If the budget allows, call `confirm_seeds` on the top 2
-   candidates. Seed noise is real: a single run can be a few tenths of a point lucky.
+6. **Confirm before registering.** Spend the confirm share: call `confirm_seeds` on the top
+   1–2 candidates. Seed noise is real: a single run can be a few tenths of a point lucky.
    - **A gain only counts if it is larger than the measured seed noise**: the larger of the
      two candidates' stds. Smaller differences are a tie.
    - Pick the candidate with the best **mean** score (on a tie, prefer the cheaper or
      simpler one).
 7. **Finish** by calling `register_model` on a run of the chosen candidate. In the notes, say
-   it was chosen by mean validation score, and give mean ± std for both candidates (or say
-   that seeds could not be checked for lack of budget). Then stop.
+   it was chosen by mean validation score and give mean ± std for the candidates.
+   **Registering without a seed check is allowed only if the plan explicitly ran out of
+   budget**, and then the notes must say so: "single-seed score, not seed-checked: budget
+   exhausted". Then stop.
 
 # Rules
 

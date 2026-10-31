@@ -24,20 +24,38 @@ from gotrain.tools._common import (
 )
 from gotrain.tools.trials import (
     EPSILON_MIN,
+    SEED_CHECK_SEEDS,
     _budget_problem,
     _dataset_card,
     _execute_trial,
     _parse_config,
     _row,
     budget_status,
+    seed_check_status,
 )
 
 MAX_SEEDS = 5
+MIN_SCREENING_SPREAD = 0.005  # below this, rung 1 can't tell configs apart from seed noise
+INCONCLUSIVE_WARNING = (
+    "rung 1 was inconclusive; consider a longer short_minutes or train_subset_frac"
+)
 HALVING_ROW_KEYS = ("rung", "parent")
 
 
 def _original_reason(reason: str) -> str:
     return reason.split("Original reason: ")[-1]
+
+
+def screening_summary(rung1: list[dict]) -> dict:
+    """Spread of rung-1 scores (best minus worst), with a warning if it is within noise."""
+    scores = [e["val_score"] for e in rung1 if e["status"] == "ok"]
+    if len(scores) < 2:
+        return {"screening_spread": None}
+    spread = round(max(scores) - min(scores), 4)
+    out = {"screening_spread": spread}
+    if spread < MIN_SCREENING_SPREAD:
+        out["warning"] = INCONCLUSIVE_WARNING
+    return out
 
 
 def _affordability_hint(remaining: float, n: int, short: float, long: float, keep: int) -> str:
@@ -68,6 +86,7 @@ def run_halving(
     Rung 1 trains each valid config with short_minutes. The keep_top best by val_score are
     re-trained with long_minutes as child runs (parent = their rung-1 run). The whole round's
     cost (n * short + keep_top * long) is checked against the budget before anything starts.
+    "screening_spread" is best minus worst rung-1 score; under 0.005 rung 1 was inconclusive.
 
     Args:
         task: GEO-Bench task name, e.g. "m-eurosat".
@@ -137,8 +156,10 @@ def run_halving(
         "estimated_cost_min": round(cost, 3),
         "trials": [_row(e, *HALVING_ROW_KEYS) for e in rung1 + rung2],
         "winner": _row(winner, *HALVING_ROW_KEYS) if winner else None,
+        **screening_summary(rung1),
         "invalid": invalid,
         "skipped": skipped,
+        **seed_check_status(task),
     }
 
 
@@ -158,7 +179,9 @@ def _promote_in_halving(task: str, parent: dict, minutes: float, halving_id: str
 
 
 @tool
-def confirm_seeds(run_id: str, n_seeds: int = 2, budget_minutes: float | None = None) -> dict:
+def confirm_seeds(
+    run_id: str, n_seeds: int = SEED_CHECK_SEEDS, budget_minutes: float | None = None
+) -> dict:
     """Re-train a run's exact config with new seeds to measure how much of its score is luck.
 
     The new runs join the original in a seed group. Returns every score, the mean and the

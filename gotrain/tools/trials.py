@@ -36,6 +36,7 @@ from gotrain.tools._common import (
 )
 
 EPSILON_MIN = 1e-9
+SEED_CHECK_SEEDS = 2  # confirm_seeds' default; the seed-check reserve is priced at this
 
 
 # ---------------------------------------------------------------- budget ledger
@@ -88,6 +89,30 @@ def _budget_problem(task: str, minutes: float) -> dict | None:
             "register the best run so far.",
         )
     return None
+
+
+def best_run(task: str) -> dict | None:
+    """The current best successful run by val score."""
+    ok = [e for e in rank(load_entries(task)) if e["status"] == "ok"]
+    return ok[0] if ok else None
+
+
+def seed_check_cost(entry: dict) -> float:
+    """Minutes confirm_seeds needs for this run: SEED_CHECK_SEEDS runs at its own budget."""
+    return SEED_CHECK_SEEDS * entry["budget_minutes"]
+
+
+def seed_check_status(task: str) -> dict:
+    """Can the budget still pay for a seed check of the current best? (None: no best yet.)"""
+    best = best_run(task)
+    if best is None:
+        return {"seed_check_cost_min": None, "can_afford_seed_check": None}
+    cost = seed_check_cost(best)
+    remaining = budget_status(task)["remaining_min"]
+    return {
+        "seed_check_cost_min": round(cost, 3),
+        "can_afford_seed_check": remaining + EPSILON_MIN >= cost,
+    }
 
 
 def _charge(task: str, minutes: float) -> None:
@@ -236,6 +261,7 @@ def run_trials(task: str, configs: list[dict], budget_minutes_per_trial: float) 
         "invalid": invalid,
         "skipped": skipped,
         "best_overall": _row(best) if best else None,
+        **seed_check_status(task),
     }
     if invalid:
         out["hint"] = "Fix the invalid configs using the messages above and resubmit only those."
@@ -243,12 +269,17 @@ def run_trials(task: str, configs: list[dict], budget_minutes_per_trial: float) 
 
 
 @tool
-def promote(run_id: str, extra_budget_minutes: float) -> dict:
+def promote(run_id: str, extra_budget_minutes: float, force: bool = False) -> dict:
     """Re-train a run's exact config with its budget + extra_budget_minutes, as a child run.
+
+    Refuses if, afterwards, the budget could no longer pay for a seed check (confirm_seeds,
+    2 seeds) of the best run, unless force=true.
 
     Args:
         run_id: A successful run that stopped before max_epochs (from run_trials/leaderboard).
         extra_budget_minutes: Minutes added to the parent's per-trial budget.
+        force: Promote even if no seed check would be affordable afterwards. The final pick
+            would then rest on a single-seed score; say so in the register_model notes.
     """
     parent = find_entry(run_id)
     if parent is None:
@@ -273,6 +304,8 @@ def promote(run_id: str, extra_budget_minutes: float) -> dict:
     budget = parent["budget_minutes"] + extra_budget_minutes
     if problem := _budget_problem(task, budget):
         return problem
+    if not force and (problem := _seed_reserve_problem(task, budget)):
+        return problem
     config = TrainConfig.model_validate_json(
         storage().read_text(f"{run_key(task, run_id)}/config.json")
     )
@@ -294,7 +327,30 @@ def promote(run_id: str, extra_budget_minutes: float) -> dict:
         "parent": {k: parent[k] for k in ("run_id", "val_score", "minutes", "epochs")},
         "child": {k: child[k] for k in ("run_id", "status", "val_score", "minutes", "epochs")},
         "delta_val_score": delta,
+        "forced": force,
+        **seed_check_status(task),
     }
+
+
+def _seed_reserve_problem(task: str, budget: float) -> dict | None:
+    """Error if a `budget`-minute promote could leave too little to seed-check the winner.
+
+    The best run afterwards is either today's best or the new child, so the reserve kept
+    must cover a seed check of whichever costs more.
+    """
+    best = best_run(task)
+    reserve = max(seed_check_cost(best), SEED_CHECK_SEEDS * budget)
+    left = budget_status(task)["remaining_min"] - budget
+    if left + EPSILON_MIN >= reserve:
+        return None
+    return error(
+        f"promoting to {budget:g} min would leave {max(left, 0):g} min, but a seed check of "
+        f"the best run afterwards needs {reserve:g} min ({SEED_CHECK_SEEDS} seeds at its "
+        "budget). Without it, the final pick would rest on one possibly lucky score.",
+        "Seed-check the current best first (confirm_seeds), promote with less extra time, or "
+        "pass force=true if you accept registering without a seed check (say so in the notes).",
+        **seed_check_status(task),
+    )
 
 
 @tool

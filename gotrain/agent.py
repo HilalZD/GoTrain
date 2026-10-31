@@ -179,7 +179,7 @@ def kickoff_message(task: str, phase: Phase, max_tool_calls: int | None = None) 
         f"Tool-call limit for this session: {calls}.",
     ]
     if phase == "tune":
-        lines.append("Begin by inspecting the dataset and reading relevant lessons.")
+        lines.append("Start with your BUDGET PLAN, then inspect the dataset and read lessons.")
     else:
         lines.append("Registered versions (validation scores):")
         for version in list_versions(task):

@@ -1,0 +1,48 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gotrain"
+version = "0.1.0"
+description = "An AI agent that trains geospatial models on GEO-Bench by itself."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "strands-agents",
+    "geobench",
+    "pydantic>=2",
+    "pydantic-settings>=2",
+    "boto3",
+    "mcp",
+    "rich",
+]
+
+[project.optional-dependencies]
+# Deliberately unpinned and optional: the SageMaker instance already ships a CUDA
+# build of torch. A plain `pip install -e .` must never touch it. See README.
+ml = [
+    "torch",
+    "torchvision",
+    "timm",
+    "torchgeo",
+    "segmentation-models-pytorch",
+]
+dev = [
+    "pytest",
+    "ruff",
+]
+
+[tool.setuptools.packages.find]
+include = ["gotrain*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["scratch"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

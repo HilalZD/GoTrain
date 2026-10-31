@@ -1,0 +1,15 @@
+# Data and model weights never go into git
+data/
+*.ckpt
+*.pt
+registry/**/checkpoints/
+
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.egg-info/
+.venv/
+.pytest_cache/
+.ruff_cache/

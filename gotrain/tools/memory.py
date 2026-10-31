@@ -9,9 +9,11 @@ Each lesson is one dated, tagged entry:
 
 import re
 
+from gotrain.config import get_settings
 from gotrain.tools._common import error, now_utc, storage, tool
 
 LESSONS_KEY = "memory/lessons.md"
+ISOLATED_LESSONS_KEY = "memory/lessons_isolated.md"  # GOTRAIN_MEMORY=empty (memory ablation)
 MAX_LESSON_CHARS = 1500
 MAX_RETURNED = 20
 ENTRY = re.compile(
@@ -22,13 +24,17 @@ ENTRY = re.compile(
 )
 
 
+def lessons_key() -> str:
+    return ISOLATED_LESSONS_KEY if get_settings().memory == "empty" else LESSONS_KEY
+
+
 def normalize_tags(tags: list[str]) -> list[str]:
     return sorted({t.strip().lower() for t in tags if t.strip()})
 
 
 def all_lessons() -> list[dict]:
     """Every lesson in the file, oldest first."""
-    if not storage().exists(LESSONS_KEY):
+    if not storage().exists(lessons_key()):
         return []
     return [
         {
@@ -37,7 +43,7 @@ def all_lessons() -> list[dict]:
             "tags": normalize_tags(m["tags"].split(",")),
             "lesson": m["text"].strip(),
         }
-        for m in ENTRY.finditer(storage().read_text(LESSONS_KEY))
+        for m in ENTRY.finditer(storage().read_text(lessons_key()))
     ]
 
 
@@ -74,7 +80,7 @@ def write_lesson(task: str, lesson: str, tags: list[str]) -> dict:
             "Keep only the finding and the evidence (scores), not the whole history.",
         )
     entry = f"\n## {now_utc():%Y-%m-%d} {task}\ntags: {', '.join(clean_tags)}\n{text}\n"
-    storage().append_text(LESSONS_KEY, entry)
+    storage().append_text(lessons_key(), entry)
     return {"task": task, "saved": True, "tags": clean_tags, "n_lessons": len(all_lessons())}
 
 

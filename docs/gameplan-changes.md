@@ -115,9 +115,19 @@ trial finished only one epoch of the 15k-sample train split.
   for a seed check of the best run (today's best or the new child, whichever costs more),
   unless `force=true`.
 - **Screening quality.** `run_halving` reports `screening_spread` (best minus worst rung-1
-  score) and warns when it is under 0.005: "rung 1 was inconclusive; consider a longer
-  short_minutes or train_subset_frac". On train splits over 5,000 samples the agent screens
-  with `train_subset_frac` 0.2-0.3 (`inspect_dataset` adds a `screening_hint`).
+  score) and a `warnings` list:
+  - spread under 0.005: "rung 1 was inconclusive; consider a longer short_minutes or
+    train_subset_frac";
+  - any rung-1 trial that finished fewer than 3 epochs: "rung 1 trials finished only N
+    epochs; screening is unreliable. Use train_subset_frac 0.2-0.3 or a longer
+    short_minutes", naming those runs. This is the check that catches the brick-kiln
+    incident: its spread (0.016) was above 0.005, but every trial ran a single epoch.
+
+  On train splits over 5,000 samples the agent screens with `train_subset_frac` 0.2-0.3
+  (`inspect_dataset` adds a `screening_hint`).
+- **Seed-check reserve is deliberately strict** (agreed): it covers a seed check of today's
+  best *or* the promoted child, whichever costs more, because a winning child is what gets
+  registered.
 - **Registering single-seed** is allowed only when the plan explicitly ran out of budget,
   and the model card notes must say so.
 - **Fake engine.** Epoch time scales with `train_subset_frac`, so a 0.25 subsample fits ~4x

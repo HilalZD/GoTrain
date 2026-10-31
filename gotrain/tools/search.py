@@ -39,6 +39,7 @@ MIN_SCREENING_SPREAD = 0.005  # below this, rung 1 can't tell configs apart from
 INCONCLUSIVE_WARNING = (
     "rung 1 was inconclusive; consider a longer short_minutes or train_subset_frac"
 )
+MIN_SCREENING_EPOCHS = 3  # fewer, and rung-1 scores mostly reflect how far training got
 HALVING_ROW_KEYS = ("rung", "parent")
 
 
@@ -47,15 +48,29 @@ def _original_reason(reason: str) -> str:
 
 
 def screening_summary(rung1: list[dict]) -> dict:
-    """Spread of rung-1 scores (best minus worst), with a warning if it is within noise."""
+    """Spread of rung-1 scores (best minus worst) plus warnings if the screen is unreliable.
+
+    Warns when the spread is within seed noise, and when trials finished too few epochs
+    to rank configs (errored configs never trained, so they are not counted).
+    """
     scores = [e["val_score"] for e in rung1 if e["status"] == "ok"]
-    if len(scores) < 2:
-        return {"screening_spread": None}
-    spread = round(max(scores) - min(scores), 4)
-    out = {"screening_spread": spread}
-    if spread < MIN_SCREENING_SPREAD:
-        out["warning"] = INCONCLUSIVE_WARNING
-    return out
+    spread = round(max(scores) - min(scores), 4) if len(scores) >= 2 else None
+    warnings = []
+    if spread is not None and spread < MIN_SCREENING_SPREAD:
+        warnings.append(INCONCLUSIVE_WARNING)
+    if short := [e for e in rung1 if e["status"] != "error" and e["epochs"] < MIN_SCREENING_EPOCHS]:
+        warnings.append(few_epochs_warning(short))
+    return {"screening_spread": spread, "warnings": warnings}
+
+
+def few_epochs_warning(short: list[dict]) -> str:
+    runs = ", ".join(f"{e['run_id']} ({e['epochs']})" for e in short)
+    fewest = min(e["epochs"] for e in short)
+    return (
+        f"rung 1 trials finished only {fewest} epochs; screening is unreliable. "
+        f"Use train_subset_frac 0.2–0.3 or a longer short_minutes. "
+        f"Runs (epochs): {runs}"
+    )
 
 
 def _affordability_hint(remaining: float, n: int, short: float, long: float, keep: int) -> str:
@@ -86,7 +101,8 @@ def run_halving(
     Rung 1 trains each valid config with short_minutes. The keep_top best by val_score are
     re-trained with long_minutes as child runs (parent = their rung-1 run). The whole round's
     cost (n * short + keep_top * long) is checked against the budget before anything starts.
-    "screening_spread" is best minus worst rung-1 score; under 0.005 rung 1 was inconclusive.
+    "screening_spread" is best minus worst rung-1 score; "warnings" flags an unreliable screen
+    (spread under 0.005, or rung-1 trials that finished fewer than 3 epochs).
 
     Args:
         task: GEO-Bench task name, e.g. "m-eurosat".

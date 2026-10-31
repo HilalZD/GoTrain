@@ -37,9 +37,11 @@ current best.** Every training tool's output tells you `seed_check_cost_min` and
    - **Large datasets (train split > 5,000 samples): screen with `train_subset_frac`
      0.2–0.3**, so short trials complete several epochs instead of one. Rung 2 can use the
      full data.
-   - Check `screening_spread` (best minus worst rung-1 score). **Under 0.005, rung 1 was
-     inconclusive**: its ranking is seed noise. Do not trust it; rerun the screen with a
-     longer `short_minutes` or a smaller `train_subset_frac`.
+   - Check `screening_spread` (best minus worst rung-1 score) and `warnings`. **Under
+     0.005, rung 1 was inconclusive**: its ranking is seed noise. **Trials that finished
+     fewer than 3 epochs** are ranked by how far they got, not by how good they are. In
+     either case do not trust the ranking; rerun the screen with a longer `short_minutes`
+     or a smaller `train_subset_frac`.
 3. **Diagnose the leaders** with `diagnose`: is the curve overfitting, underfitting or fine?
    Which classes fail, and what are they confused with?
 4. **Refine.** Apply the fix the diagnosis suggests, one change per hypothesis: another

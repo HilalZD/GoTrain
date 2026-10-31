@@ -443,3 +443,12 @@ VALIDATION only.
   `overnight_a.yaml` is a label_fracs entry that skips tuning when a model is already registered
   in its home (it reuses the one the first m-eurosat entry registered; if none exists it tunes).
   `pyyaml` added to the dependencies.
+
+## Confidence intervals on the test score (M3)
+
+`final_test` computes a 95% bootstrap CI (1000 resamples of test images, seed 0,
+`gotrain/bootstrap.py`) from `per_sample`: accuracy (classification), mIoU recomputed from
+per-image intersection/union (segmentation), micro-F1 (multilabel). `TestRecord` gains optional
+`ci_low`, `ci_high`, `ci_level`, `ci_resamples` (old records load with `None`); the lock file and
+ledger carry them, and a "Test result" section is appended to the version's model card. A CI
+failure never loses the score: the record is then written without a CI.

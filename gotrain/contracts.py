@@ -240,6 +240,11 @@ class TestRecord(BaseModel):
     metric_name: str
     git_commit: str = Field(min_length=1)
     timestamp: datetime
+    # 95% bootstrap CI over test images; None on records written before it existed
+    ci_low: float | None = None
+    ci_high: float | None = None
+    ci_level: float | None = None
+    ci_resamples: int | None = None
 
 
 def format_errors(err: ValidationError, model: type[BaseModel] | None = None) -> str:

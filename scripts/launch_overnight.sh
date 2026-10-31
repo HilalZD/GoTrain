@@ -18,6 +18,13 @@ if [ -e "$HOME/GOTRAIN_STOP" ]; then
   exit 1
 fi
 
+# the real engine reads the prebuilt .npy cache from here (scripts/build_cache.py)
+export GOTRAIN_DATA_CACHE="${GOTRAIN_DATA_CACHE:-$HOME/data_cache}"
+if [ ! -d "$GOTRAIN_DATA_CACHE" ]; then
+  echo "refusing: data cache $GOTRAIN_DATA_CACHE not found (run scripts/build_cache.py)" >&2
+  exit 1
+fi
+
 mkdir -p "$HOME/gotrain_home"
 log="$HOME/gotrain_home/overnight-$(basename "$plan" .yaml)-$(date -u +%Y%m%d-%H%M%S).log"
 GOTRAIN_ENGINE=real GOTRAIN_HOME="${GOTRAIN_HOME:-$HOME/gotrain_home}" \

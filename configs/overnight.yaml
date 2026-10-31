@@ -1,0 +1,9 @@
+# One GPU, one queue, tune only. Launch: scripts/launch_overnight.sh configs/overnight.yaml
+queue:
+  - {task: m-eurosat, budget_min: 40, home: ~/gotrain_home, memory: shared}
+  - {task: m-brick-kiln, budget_min: 75, home: ~/gotrain_home, memory: shared}
+  - {task: m-pv4ger-seg, budget_min: 120, home: ~/gotrain_home, memory: shared}
+  - {task: m-chesapeake, budget_min: 120, home: ~/gotrain_home, memory: shared}
+  - {task: m-brick-kiln, budget_min: 75, home: ~/gotrain_ablation, memory: empty}
+  # label curve: reuses the model registered for m-eurosat above (skips tuning)
+  - {task: m-eurosat, budget_min: 40, home: ~/gotrain_home, memory: shared, label_fracs: [0.05, 0.1, 0.25, 0.5]}

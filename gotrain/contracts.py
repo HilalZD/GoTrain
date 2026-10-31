@@ -141,6 +141,12 @@ class DatasetCard(BaseModel):
     nodata_fraction: float | None = Field(default=None, ge=0.0, le=1.0)
     constant_bands: list[str] | None = None
     stats_n_samples: int | None = Field(default=None, ge=1)
+    majority_class_baseline: float | None = Field(
+        default=None, ge=0.0, le=1.0, description="Accuracy of always predicting the top class."
+    )
+    flat_tile_fraction: dict[str, float] | None = Field(
+        default=None, description="Per class: fraction of its tiles that are (nearly) constant."
+    )
 
     @field_validator("image_size", mode="before")
     @classmethod
@@ -217,6 +223,10 @@ class ModelVersion(BaseModel):
         default_factory=list, description="Run ids averaged at inference; [run_id] if single."
     )
     tta: bool = Field(default=False, description="Test-time augmentation (8 flip/rot90 views).")
+    # when val_score is a seed-group mean: its spread, seed count and the run's own score
+    val_std: float | None = None
+    val_n: int | None = None
+    single_val_score: float | None = None
 
     @model_validator(mode="after")
     def _members_include_run(self) -> "ModelVersion":

@@ -55,7 +55,8 @@ def files_to_copy(home: Path) -> list[Path]:
             found += [vdir / "model_card.md", vdir / "model_version.json"]
     found += sorted((home / "logs").glob(f"*/*{JOURNAL_SUFFIX}"))
     found += sorted((home / "label_efficiency").glob("*.json"))
-    found += [home / "queue_status.json", home / "memory" / "lessons.md"]
+    found += sorted(home.glob("queue_status_*.json"))
+    found += [home / "memory" / "lessons.md"]
     return [p for p in found if p.is_file()]
 
 

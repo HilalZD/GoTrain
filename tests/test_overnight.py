@@ -54,21 +54,26 @@ def entry(home, **extra):
     return {"task": TASK, "budget_min": 8, "home": str(home), "memory": "shared", **extra}
 
 
-def status(home) -> list[dict]:
-    return json.loads((home / "queue_status.json").read_text(encoding="utf-8"))
+def status(home, plan="plan") -> list[dict]:
+    return json.loads((home / f"queue_status_{plan}.json").read_text(encoding="utf-8"))
 
 
 def test_plans_load_and_never_finalise():
     root = Path(__file__).resolve().parents[1] / "configs"
-    a, b = (overnight.load_plan(root / f"overnight_{x}.yaml") for x in "ab")
-    assert [(e["task"], e["budget_min"]) for e in a[:3]] == [
-        ("m-eurosat", 45),
-        ("m-brick-kiln", 90),
-        ("m-brick-kiln", 90),
+    plan = overnight.load_plan(root / "overnight.yaml")
+    assert [(e["task"], e["budget_min"]) for e in plan] == [
+        ("m-eurosat", 40),
+        ("m-brick-kiln", 75),
+        ("m-pv4ger-seg", 120),
+        ("m-chesapeake", 120),
+        ("m-brick-kiln", 75),
+        ("m-eurosat", 40),
     ]
-    assert a[2]["memory"] == "empty" and a[3]["label_fracs"] == [0.05, 0.1, 0.25, 0.5]
-    assert [e["task"] for e in b] == ["m-pv4ger-seg", "m-chesapeake"]
-    assert "finalise" not in (root / "overnight_a.yaml").read_text()
+    assert plan[4]["memory"] == "empty" and plan[4]["home"] == "~/gotrain_ablation"
+    assert plan[5]["label_fracs"] == [0.05, 0.1, 0.25, 0.5]
+    (smoke,) = overnight.load_plan(root / "smoke.yaml")
+    assert smoke["budget_min"] == 4 and smoke["label_fracs"] == [0.1]
+    assert "finalise" not in (root / "overnight.yaml").read_text()
 
 
 def test_entry_runs_tune_only_and_writes_status_and_log(tmp_path):
@@ -146,3 +151,23 @@ def test_label_entry_reuses_an_already_registered_model(tmp_path, monkeypatch):
     monkeypatch.setattr(overnight, "cli_run", lambda args: pytest.fail("must not tune again"))
     (row,) = overnight.run_queue([entry(home, label_fracs=[0.5])])
     assert row["status"] == "ok" and (home / "label_efficiency" / f"{TASK}.json").exists()
+
+
+def test_two_plans_share_a_home_without_clobbering_each_other(tmp_path):
+    home = tmp_path / "s_dev"
+    overnight.run_queue([entry(home)], "overnight_a")
+    overnight.run_queue([entry(home, task="m-brick-kiln")], "overnight_b")
+    assert status(home, "overnight_a")[0]["task"] == TASK
+    assert status(home, "overnight_b")[0]["task"] == "m-brick-kiln"
+    assert (home / "logs" / "queue" / "overnight_a").is_dir()
+    assert (home / "logs" / "queue" / "overnight_b").is_dir()
+
+
+def test_concurrent_lesson_writes_are_all_kept(home):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from gotrain.tools.memory import all_lessons, write_lesson
+
+    with ThreadPoolExecutor(8) as pool:
+        list(pool.map(lambda i: write_lesson(TASK, f"lesson {i} " + "x" * 400, ["a"]), range(40)))
+    assert len(all_lessons()) == 40

@@ -45,7 +45,13 @@ def test_hints_follow_the_active_engine(monkeypatch, tmp_path):
     monkeypatch.setenv("GOTRAIN_HOME", str(tmp_path / "gotrain_home"))
     assert active_timing() is REAL_T4
     assert card_minutes_per_epoch(card) * 60 == pytest.approx(34.0, abs=0.5)
-    assert screening_advice(card) is None  # 3 real epochs fit in a 2-min screen
+    # 3 x 34 s + 28 s fixed overhead = 2.2 min: no longer fits a 2-min screen
+    assert "short_minutes >= 2.2 (incl. 28 s fixed overhead)" in screening_advice(card)
+    eurosat = CARDS["m-eurosat"]
+    assert screening_advice(eurosat) is None  # 3 x ~2 s + 19 s still fits
+    assert REAL_T4.overhead_minutes() * 60 == pytest.approx(19.0)
+    assert REAL_T4.overhead_minutes(segmentation=True) * 60 == pytest.approx(28.0)
+    assert FAKE_TIMING.overhead_minutes(segmentation=True) == 0.0
 
 
 def test_subset_accounts_for_the_fixed_validation_pass():
@@ -54,7 +60,17 @@ def test_subset_accounts_for_the_fixed_validation_pass():
     assert subset_for_epochs(card, 0.05, timing=REAL_T4) is None
     frac = subset_for_epochs(card, 1.0, timing=REAL_T4)
     per_epoch = card_minutes_per_epoch(card, frac=frac, timing=REAL_T4)
-    assert 3 * per_epoch <= 1.0
+    assert 3 * per_epoch + REAL_T4.overhead_minutes(segmentation=True) <= 1.0
+    # the fixed overhead alone (28 s) leaves no room in a 0.4-min trial
+    assert subset_for_epochs(card, 0.4, timing=REAL_T4) is None
+
+
+def test_minutes_for_epochs_adds_the_fixed_overhead_once():
+    from gotrain.engine.throughput import minutes_for_epochs
+
+    card = CARDS["m-eurosat"]
+    one = minutes_for_epochs(card, 1.0, epochs=1, timing=REAL_T4)
+    assert one == pytest.approx(1.0 + 19 / 60)
 
 
 # ---------------------------------------------------------------- targets

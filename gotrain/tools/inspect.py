@@ -30,7 +30,15 @@ def summarize_card(card: DatasetCard) -> dict:
         summary["class_distribution"] = {k: round(v, 3) for k, v in fractions.items()}
     if fractions and min(fractions.values()) > 0:
         summary["imbalance_ratio"] = round(max(fractions.values()) / min(fractions.values()), 1)
-    optional = ("dtype", "value_range", "label_format", "nodata_fraction", "constant_bands")
+    optional = (
+        "dtype",
+        "value_range",
+        "label_format",
+        "nodata_fraction",
+        "constant_bands",
+        "majority_class_baseline",
+        "flat_tile_fraction",
+    )
     summary.update({k: getattr(card, k) for k in optional if getattr(card, k) is not None})
     summary["valid_backbones_by_weights"] = valid_combos_for(card)
     summary["training_rules"] = rules_for(card)

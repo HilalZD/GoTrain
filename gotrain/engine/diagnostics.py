@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -171,11 +172,31 @@ def worst_indices(task_type: str, preds: dict, k: int = N_WORST) -> list[int]:
     return np.argsort(true_prob)[:k].tolist()  # confidently wrong first
 
 
+def class_cmap(n_classes: int) -> Any:
+    """One fixed colour per class (tab10, or tab20 for more than 10), as in scratch/explore.py."""
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import ListedColormap
+
+    palette = plt.get_cmap("tab10" if n_classes <= 10 else "tab20")
+    return ListedColormap([palette(c % palette.N) for c in range(n_classes)])
+
+
+def _show_mask(ax: Any, mask: np.ndarray, cmap: Any, n_classes: int) -> None:
+    """Classes in their fixed colours; values outside [0, n_classes) (ignore) in light grey."""
+    mask = np.asarray(mask).squeeze().astype(np.int64)
+    if mask.max(initial=0) == 255 and set(np.unique(mask).tolist()) <= {0, 255}:
+        mask = mask // 255
+    ax.imshow(np.full(mask.shape + (3,), 0.85))
+    valid = np.ma.masked_where((mask < 0) | (mask >= n_classes), mask)
+    ax.imshow(valid, cmap=cmap, vmin=0, vmax=n_classes - 1, interpolation="nearest")
+
+
 def save_error_grid(path: Path, ckpt: dict, preds: dict, idx: list[int]) -> Path:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.patches import Patch
 
     from gotrain.engine.train import checkpoint_dataset
 
@@ -185,6 +206,7 @@ def save_error_grid(path: Path, ckpt: dict, preds: dict, idx: list[int]) -> Path
     # zero-filled ones the task lacks (ssl4eo_s2 on m-brick-kiln: B06, B09, B10), so pick RGB here.
     rgb = rgb_indices(ds.all_bands)
     seg = ckpt["task_type"] == "segmentation"
+    cmap = class_cmap(len(names))
     cols = 3 if seg else 4
     rows = len(idx) if seg else int(np.ceil(len(idx) / cols))
     fig, axes = plt.subplots(rows, cols, figsize=(3.0 * cols, 3.2 * rows), squeeze=False)
@@ -194,17 +216,13 @@ def save_error_grid(path: Path, ckpt: dict, preds: dict, idx: list[int]) -> Path
         arr, label = ds.raw(i)
         img = stretch(arr[..., rgb])
         if seg:
-            truth = np.asarray(label).squeeze()
-            vmax = max(len(names) - 1, 1)
-            panels = [
-                (img, f"val #{i} image"),
-                (truth, "truth"),
-                (preds["pred_masks"][i], f"prediction (mIoU {preds['image_score'][i]:.2f})"),
-            ]
-            for ax, (data, title) in zip(axes[k], panels, strict=True):
-                kw = {} if data.ndim == 3 else {"cmap": "viridis", "vmin": 0, "vmax": vmax}
-                ax.imshow(data, interpolation="nearest", **kw)
-                ax.set_title(title, fontsize=8)
+            a_img, a_truth, a_pred = axes[k]
+            a_img.imshow(img)
+            a_img.set_title(f"val #{i} image", fontsize=8)
+            _show_mask(a_truth, label, cmap, len(names))
+            a_truth.set_title("truth", fontsize=8)
+            _show_mask(a_pred, preds["pred_masks"][i], cmap, len(names))
+            a_pred.set_title(f"prediction (mIoU {preds['image_score'][i]:.2f})", fontsize=8)
             continue
         ax = axes.flat[k]
         ax.imshow(img)
@@ -218,7 +236,14 @@ def save_error_grid(path: Path, ckpt: dict, preds: dict, idx: list[int]) -> Path
         ax.set_title(title, fontsize=8)
     head = "image | truth | prediction" if seg else "true vs predicted class"
     fig.suptitle(f"{ckpt['task']} · worst {len(idx)} validation predictions · {head}", fontsize=10)
-    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    bottom = 0.0
+    if seg:  # class legend: which colour is which class
+        handles = [Patch(color=cmap(c), label=n) for c, n in enumerate(names)]
+        fig.legend(
+            handles=handles, loc="lower center", ncol=min(len(names), 7), fontsize=8, frameon=False
+        )
+        bottom = 0.25 / rows
+    fig.tight_layout(rect=(0, bottom, 1, 0.97))
     fig.savefig(path, dpi=90)
     plt.close(fig)
     return path

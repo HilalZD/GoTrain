@@ -519,7 +519,7 @@ def inspect_task(
     if names_fixed:
         notes.append(
             "Class names corrected: geobench's class_names list does not match the label "
-            "integers (see data_notes.md gotcha 14). Label order: "
+            "integers (evidence: CLASS_NAME_FIXES in gotrain/engine/data.py). Label order: "
             + ", ".join(f"{i} {n}" for i, n in enumerate(class_names))
             + "."
         )

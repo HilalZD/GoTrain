@@ -355,3 +355,14 @@ def test_shortcut_card_fields_use_the_final_names():
     )
     assert fields["majority_class_baseline"] == 0.7
     assert fields["flat_tile_fraction"] == {"a": 0.2}
+
+
+def test_chesapeake_card_has_the_request_11_fields():
+    rec = recon("m-chesapeake")
+    assert rec["majority_class_baseline"] == pytest.approx(0.0527, abs=1e-4)
+    assert rec["majority_class_baseline_detail"] == {"predict": "tree canopy", "metric": "miou"}
+    flat = rec["flat_tile_fraction"]
+    assert flat["no data"] == 1.0 and flat["water"] == pytest.approx(0.118, abs=1e-3)
+    assert max(v for k, v in flat.items() if k not in ("no data", "water")) <= 0.0024
+    notes = data.to_dataset_card(rec).notes
+    assert "Majority-class baseline on val" in notes and "no data 100.0%" in notes

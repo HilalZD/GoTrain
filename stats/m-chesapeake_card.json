@@ -69,7 +69,7 @@
     0.264345
   ],
   "notes": [
-    "Class names corrected: geobench's class_names list does not match the label integers (see data_notes.md gotcha 22). Label order: 0 no data, 1 water, 2 tree canopy, 3 low vegetation, 4 barren, 5 impervious other, 6 impervious roads.",
+    "Class names corrected: geobench's class_names list does not match the label integers (evidence: CLASS_NAME_FIXES in gotrain/engine/data.py). Label order: 0 no data, 1 water, 2 tree canopy, 3 low vegetation, 4 barren, 5 impervious other, 6 impervious roads.",
     "imbalance: class 'no data' is 4.17% of pixels",
     "imbalance: class 'barren' is 4.67% of pixels",
     "imbalance: class 'impervious roads' is 2.91% of pixels",
@@ -135,6 +135,24 @@
   "band_names_corrected": false,
   "class_names_corrected": true,
   "excluded_pixels": 4980736,
+  "majority_class_baseline": 0.0527,
+  "majority_class_baseline_detail": {
+    "predict": "tree canopy",
+    "metric": "miou"
+  },
+  "flat_tile_fraction": {
+    "no data": 1.0,
+    "water": 0.1178,
+    "tree canopy": 0.0012,
+    "low vegetation": 0.0024,
+    "barren": 0.0,
+    "impervious other": 0.0008,
+    "impervious roads": 0.0
+  },
+  "flat_tile_overall": 0.073,
+  "flat_tile_threshold": 0.25,
+  "flat_tile_definition": "a tile is nearly flat when the median over bands of (p98 - p2 of its valid pixels in that band) / (that band's train std) is below 0.25",
+  "flat_tile_n": 2000,
   "example_sample": {
     "name": "id_070382",
     "shape_hwc": [

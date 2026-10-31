@@ -26,6 +26,7 @@ Metrics: accuracy (classification), micro-F1 "f1" (multilabel), mIoU "miou" (seg
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import random
@@ -38,6 +39,7 @@ from typing import Any
 import numpy as np
 
 from gotrain.contracts import DatasetCard, EpochRecord, TrainConfig, TrainResult
+from gotrain.engine.combos import check_combo
 from gotrain.engine.data import (
     IGNORE_INDEX,
     TEST_SPLIT,
@@ -46,7 +48,7 @@ from gotrain.engine.data import (
     subset_indices,
 )
 from gotrain.engine.interface import load_band_stats
-from gotrain.engine.models import UNET_STRIDE, ModelSpec, build_model, check_spec
+from gotrain.engine.models import UNET_STRIDE, ModelSpec, build_model, ssl4eo_inputs
 from gotrain.engine.models import input_normalisation as model_normalisation
 
 METRIC = {"classification": "accuracy", "multilabel": "f1", "segmentation": "miou"}
@@ -91,19 +93,50 @@ def config_problem(config: TrainConfig, card: DatasetCard) -> str | None:
             return f"bands {unknown} not in {card.task}; available: {card.bands}"
     if card.task_type == "segmentation" and config.img_size % UNET_STRIDE:
         return f"segmentation img_size must be a multiple of {UNET_STRIDE}, got {config.img_size}"
-    return check_spec(model_spec(config, card, mean=[], std=[]))
+    combo = check_combo(card, config.backbone, config.weights)  # Hilal's single source of truth
+    if combo:
+        return combo
+    if config.weights == "ssl4eo_s2":
+        inputs, zero, _ = ssl4eo_inputs(selected_bands(config, card))
+        if len(zero) == len(inputs):
+            return "weights 'ssl4eo_s2' need at least one Sentinel-2 band (B01..B12, B8A)"
+    return None
 
 
-def model_spec(config: TrainConfig, card: DatasetCard, mean: list, std: list) -> ModelSpec:
-    return ModelSpec(
+def model_spec(config: TrainConfig, card: DatasetCard, stats: Any) -> tuple[ModelSpec, list]:
+    """The model's input spec and the selected bands it leaves out (ssl4eo_s2 only).
+
+    imagenet/none: the selected bands, z-scored with the TRAIN stats.
+    ssl4eo_s2:     always the 13 SSL4EO bands in TorchGeo order; missing ones zero-filled.
+    """
+    selected = selected_bands(config, card)
+    zero, dropped = [], []
+    bands = selected
+    if config.weights == "ssl4eo_s2":
+        bands, zero, dropped = ssl4eo_inputs(selected)
+    present = [b for b in bands if b not in zero]
+    mean = {b: stats.mean[stats.bands.index(b)] for b in present}
+    std = {b: stats.std[stats.bands.index(b)] for b in present}
+    spec = ModelSpec(
         task_type=card.task_type,
         backbone=config.backbone,
         weights=config.weights,
-        bands=selected_bands(config, card),
+        bands=bands,
         n_outputs=n_outputs(card, config.loss),
-        band_mean=mean,
-        band_std=std,
+        band_mean=[mean.get(b, 0.0) for b in bands],
+        band_std=[std.get(b, 1.0) for b in bands],
+        zero_fill=zero,
     )
+    return spec, dropped
+
+
+def amp(device: Any) -> Any:
+    """fp16 mixed precision on CUDA (the T4 has no bf16); full precision on CPU."""
+    import torch
+
+    if device.type == "cuda":
+        return torch.autocast("cuda", dtype=torch.float16)
+    return contextlib.nullcontext()
 
 
 # ---------------------------------------------------------------------------------------------
@@ -232,7 +265,7 @@ def forward(model: Any, x: Any, img_size: int, segmentation: bool, tta: bool) ->
     total = None
     for fwd, back in views:
         xv = fwd(x) if fwd else x
-        with torch.autocast(x.device.type, enabled=x.device.type == "cuda"):
+        with amp(x.device):
             out = model(resize(xv, img_size)).float()
         if segmentation:
             if out.shape[-2:] != native:
@@ -384,6 +417,7 @@ def checkpoint_dataset(ckpt: dict, split: str, allow_test: bool = False) -> GeoB
         split,
         bands=ckpt["spec"]["bands"],
         norm=(ckpt["norm_mean"], ckpt["norm_std"]),
+        zero_fill=ckpt["spec"].get("zero_fill", []),
         allow_test=allow_test,
     )
 
@@ -481,18 +515,16 @@ def _train(
 
     # --- data and model ---
     bands = selected_bands(config, card)
-    stats = load_band_stats(config.task)
-    mean = [stats.mean[stats.bands.index(b)] for b in bands]
-    std = [stats.std[stats.bands.index(b)] for b in bands]
-    spec = model_spec(config, card, mean, std)
+    spec, dropped = model_spec(config, card, load_band_stats(config.task))
     norm = model_normalisation(spec)
     train_idx = subset_indices(card.split_sizes["train"], config.train_subset_frac, config.seed)
-    train_ds = GeoBenchDataset(config.task, "train", bands=bands, norm=norm, indices=train_idx)
-    val_ds = GeoBenchDataset(config.task, "val", bands=bands, norm=norm)
+    inputs = {"bands": spec.bands, "norm": norm, "zero_fill": spec.zero_fill}
+    train_ds = GeoBenchDataset(config.task, "train", indices=train_idx, **inputs)
+    val_ds = GeoBenchDataset(config.task, "val", **inputs)
     train_dl, val_dl = _loaders(train_ds, val_ds, config.batch_size, device)
     model = build_model(spec).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
-    scaler = torch.amp.GradScaler(enabled=device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")  # fp16 loss scaling
     seg = card.task_type == "segmentation"
 
     # --- loop ---
@@ -531,7 +563,7 @@ def _train(
             x = resize(x, config.img_size)
             if seg:
                 y = resize_mask(y, config.img_size)
-            with torch.autocast(device.type, enabled=device.type == "cuda"):
+            with amp(device):
                 logits = model(x)
             loss = compute_loss(config.loss, card.task_type, logits, y, card.n_classes)
             if not torch.isfinite(loss):
@@ -596,6 +628,9 @@ def _train(
             "n_val": len(val_ds),
             "device": str(device),
             "bands": bands,
+            "model_inputs": spec.bands,
+            "zero_filled_bands": spec.zero_fill,
+            "dropped_bands": dropped,
             "normalisation": {"mean": norm[0].tolist(), "std": norm[1].tolist()},
         },
     )

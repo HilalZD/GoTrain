@@ -74,7 +74,7 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> dict
     correct = total = 0
     for x, y in loader:
         x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
-        with torch.autocast(device.type, enabled=device.type == "cuda"):
+        with torch.autocast(device.type, dtype=torch.float16, enabled=device.type == "cuda"):
             pred = (model(x).squeeze(1) > 0).long()  # logit > 0  <=>  probability > 0.5
         for c in (0, 1):
             inter[c] += ((pred == c) & (y == c)).sum().item()
@@ -132,7 +132,7 @@ def main(argv: list[str] | None = None) -> None:
 
     model = build_model().to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scaler = torch.amp.GradScaler(enabled=device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
     total_steps = args.epochs * len(train_dl)
     warmup = min(len(train_dl), total_steps // 10)
     stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -147,7 +147,7 @@ def main(argv: list[str] | None = None) -> None:
             for group in opt.param_groups:
                 group["lr"] = lr_at(step, total_steps, args.lr, warmup)
             x, y = augment(x.to(device, non_blocking=True), y.to(device, non_blocking=True))
-            with torch.autocast(device.type, enabled=device.type == "cuda"):
+            with torch.autocast(device.type, dtype=torch.float16, enabled=device.type == "cuda"):
                 logits = model(x)
             loss = dice_bce_loss(logits.float(), y)
             opt.zero_grad(set_to_none=True)

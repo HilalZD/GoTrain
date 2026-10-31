@@ -163,6 +163,8 @@ Measured (`explore.py`, seed 0, pixel stats on 2,000 of 3,000 train images, labe
 16. **B10 (cirrus) is almost empty in eurosat** (mean 12, std 4.8, versus thousands for other bands). After per-band standardisation it's mostly noise. It's a cheap candidate to drop, and the agent may find that on its own.
 17. **pv4ger-seg has almost no panel-free tiles** (6 of 3,000). A model trained on it rarely sees an empty roof, so it may over-predict panels on images without any. Validation has the same bias, so val IoU won't reveal this.
 18. **`download_tasks.py` zip-slip guard was POSIX-only.** It compared against `str(dest) + "/"`, so on Windows (paths with `\`) every zip member was refused, starting with `m-eurosat/`. It's fixed with `Path.is_relative_to`, which keeps the protection on any OS.
+20. **SSL4EO weights always see 13 Sentinel-2 bands (engine, since M4).** With `weights="ssl4eo_s2"` the engine reorders the task's bands BY NAME to TorchGeo's order (B01..B08, B8A, B09..B12), divides by 10000 as in pretraining, zero-fills bands the task lacks (m-brick-kiln: B06, B09, B10) and leaves out non-Sentinel-2 channels (brick-kiln's TCI_R/G/B). The card's notes and each run's `metrics.json` (`zero_filled_bands`, `dropped_bands`) say so. imagenet/none weights use the selected bands with the train z-score instead.
+21. **Mixed precision is fp16** (`torch.autocast("cuda", dtype=torch.float16)` + `GradScaler`): the SageMaker Tesla T4 has no bf16.
 19. **Local CPU runtime:** `explore.py` on both tasks takes ~3m45s; data on disk is 455 MB (eurosat) + 1.5 GB (pv4ger-seg) after unzip.
 
 ---

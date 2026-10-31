@@ -59,6 +59,30 @@ def test_eurosat_card_keeps_the_facts_flattening_would_lose():
     for fact in ("Band names corrected", "Class names corrected", "Nearly empty band(s): B10"):
         assert fact in card.notes
     assert "B10 29 vs B8A 5352" in card.notes  # the scale note names the real bands
+    assert "ssl4eo_s2" in card.notes and "all present" in card.notes
+
+
+def test_sentinel2_cards_pass_hilals_combo_check():
+    from gotrain.engine.combos import check_combo, is_sentinel2
+
+    eurosat = data.to_dataset_card(recon("m-eurosat"))
+    assert is_sentinel2(eurosat) and check_combo(eurosat, "resnet50", "ssl4eo_s2") is None
+    pv4ger = data.to_dataset_card(recon("m-pv4ger-seg"))
+    assert not is_sentinel2(pv4ger)
+
+
+def test_sensor_is_sentinel2_when_any_band_is_sentinel2():
+    class Sentinel2:
+        name = "B02"
+
+    class SpectralBand:
+        def __init__(self, name):
+            self.name = name
+
+    class Task:  # brick-kiln-like: Sentinel-2 bands plus derived 8-bit TCI channels
+        bands_info = [Sentinel2(), SpectralBand("TCI_R"), SpectralBand("TCI_G")]
+
+    assert data.sensor(Task()) == "sentinel-2"
 
 
 def test_pv4ger_card_mask_and_distribution():

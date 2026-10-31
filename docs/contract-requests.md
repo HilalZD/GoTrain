@@ -33,3 +33,27 @@ Each entry: what, why, and the smallest change that would do it.
   the "State on disk" section of CLAUDE.md, and returns that path in `TrainResult`. It also
   writes `history.json`, `metrics.json`, `val_predictions.npz` and, only if missing,
   `config.json` (the tools write that one first, so it is never overwritten).
+
+## 4. combos.py vs torchgeo 0.10.1: they agree (no action needed)
+
+- `VALID_COMBOS["ssl4eo_s2"] == ("resnet18", "resnet50")` matches TorchGeo exactly:
+  `ResNet18_Weights.SENTINEL2_ALL_MOCO` and `ResNet50_Weights.SENTINEL2_ALL_MOCO`, both 13
+  channels in the order B1..B8, B8a, B9..B12, pretrained on input / 10000.
+  `tests/test_engine_train.py::test_combos_ssl4eo_list_matches_torchgeo` checks this
+  against the installed torchgeo, so a future mismatch fails loudly.
+- Engine detail: for segmentation, smp only reaches `convnext_tiny` through its timm wrapper,
+  so the engine builds the U-Net encoder as `tu-convnext_tiny`. Same name for the agent.
+- The engine now validates backbone + weights with `combos.check_combo` and keeps no list
+  of its own. `describe_dataset()` sets `sensor="sentinel-2"` for every task with Sentinel-2
+  bands (including m-brick-kiln, whose 8-bit TCI channels would otherwise make it
+  "sentinel-2+aerial-rgb" and fail `is_sentinel2`).
+
+## 5. The `_dev` home check vs Serena's SageMaker folders (please confirm)
+
+- `config.py` refuses `GOTRAIN_ENGINE=fake` unless the GOTRAIN_HOME folder name ends in
+  `_dev`. Serena's agreed folders are `~/gotrain_dev_serena` and `~/gotrain_home_serena`,
+  which don't, so with the default (fake) engine any command there refuses to start.
+- **What Serena does now:** every command sets `GOTRAIN_ENGINE=real` inline. The hand
+  baselines don't use the engine at all, and engine runs are real anyway.
+- **Possible change (yours):** also accept names containing `_dev_` (e.g. `gotrain_dev_serena`)
+  as dev homes, if you want fake runs to work there.

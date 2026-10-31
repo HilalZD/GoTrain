@@ -93,7 +93,7 @@ def evaluate(model: nn.Module, loader: DataLoader, img_size: int, device: torch.
     correct = total = 0
     for x, y in loader:
         x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
-        with torch.autocast(device.type, enabled=device.type == "cuda"):
+        with torch.autocast(device.type, dtype=torch.float16, enabled=device.type == "cuda"):
             logits = model(resize(x, img_size))
         correct += int((logits.argmax(1) == y).sum())
         total += len(y)
@@ -128,7 +128,7 @@ def main(argv: list[str] | None = None) -> None:
 
     model = build_model(n_classes=10).to(device)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scaler = torch.amp.GradScaler(enabled=device.type == "cuda")
+    scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
     total_steps = args.epochs * len(train_dl)
     warmup = min(len(train_dl), total_steps // 10)
     out = (
@@ -145,7 +145,7 @@ def main(argv: list[str] | None = None) -> None:
                 group["lr"] = lr_at(step, total_steps, args.lr, warmup)
             x, y = x.to(device, non_blocking=True), y.to(device, non_blocking=True)
             x = resize(augment(x), args.img_size)
-            with torch.autocast(device.type, enabled=device.type == "cuda"):
+            with torch.autocast(device.type, dtype=torch.float16, enabled=device.type == "cuda"):
                 loss = F.cross_entropy(model(x), y)
             opt.zero_grad(set_to_none=True)
             scaler.scale(loss).backward()

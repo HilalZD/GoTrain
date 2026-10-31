@@ -17,7 +17,7 @@ pytest.importorskip("segmentation_models_pytorch")
 from gotrain.contracts import TrainConfig  # noqa: E402
 from gotrain.engine import data  # noqa: E402
 from gotrain.engine import train as engine  # noqa: E402
-from gotrain.engine.models import ModelSpec, build_model, check_spec  # noqa: E402
+from gotrain.engine.models import ModelSpec, build_model, ssl4eo_inputs  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -56,17 +56,21 @@ def have(task: str) -> bool:
     [
         ("m-eurosat", {"loss": "dice_ce"}, "does not fit a classification task"),
         ("m-eurosat", {"bands": ["B04", "B99"]}, "not in m-eurosat"),
-        ("m-eurosat", {"weights": "ssl4eo_s2", "backbone": "convnext_tiny"}, "only for backbones"),
-        ("m-eurosat", {"backbone": "not_a_model"}, "unknown timm backbone"),
+        ("m-eurosat", {"weights": "ssl4eo_s2", "backbone": "convnext_tiny"}, "not available"),
+        ("m-eurosat", {"backbone": "not_a_model"}, "not available"),
         ("m-pv4ger-seg", {"loss": "dice_bce", "img_size": 100}, "multiple of 32"),
-        ("m-pv4ger-seg", {"loss": "ce", "backbone": "nope"}, "unknown U-Net encoder"),
-        ("m-pv4ger-seg", {"loss": "dice_bce", "weights": "ssl4eo_s2"}, "need Sentinel-2 bands"),
+        ("m-pv4ger-seg", {"loss": "ce", "backbone": "nope"}, "not available"),
+        ("m-pv4ger-seg", {"loss": "dice_bce", "weights": "ssl4eo_s2"}, "only works on Sentinel-2"),
+        ("m-eurosat", {"weights": "ssl4eo_s2", "bands": ["B10"], "backbone": "resnet18"}, None),
     ],
 )
 def test_config_problems_have_actionable_messages(task, overrides, expected):
     card = data.describe_dataset(task)
     problem = engine.config_problem(cfg(task, **overrides), card)
-    assert problem and expected in problem
+    if expected is None:
+        assert problem is None
+    else:
+        assert problem and expected in problem
 
 
 @pytest.mark.parametrize(
@@ -168,9 +172,45 @@ def test_unet_shapes():
     assert build_model(spec)(torch.randn(1, 4, 64, 64)).shape == (1, 1, 64, 64)
 
 
-def test_unknown_backbone_message():
-    spec = ModelSpec("classification", "resnet1000", "none", ["a"], 2, [0.0], [1.0])
-    assert "unknown timm backbone" in check_spec(spec)
+def test_unet_convnext_goes_through_timm_universal_encoder():
+    spec = ModelSpec("segmentation", "convnext_tiny", "none", ["r", "g", "b"], 1, [0] * 3, [1] * 3)
+    assert build_model(spec)(torch.randn(1, 3, 64, 64)).shape == (1, 1, 64, 64)
+
+
+def test_combos_ssl4eo_list_matches_torchgeo():
+    """combos.py (Hilal) must only offer ssl4eo_s2 for backbones TorchGeo really provides."""
+    import torchgeo.models as tgm
+
+    from gotrain.engine.combos import VALID_COMBOS
+
+    for backbone in VALID_COMBOS["ssl4eo_s2"]:
+        enum = getattr(tgm, f"ResNet{backbone.removeprefix('resnet')}_Weights")
+        meta = enum.SENTINEL2_ALL_MOCO.meta
+        assert meta["in_chans"] == 13 and meta["model"] == backbone
+        order = [f"B{b[1:].upper().zfill(2)}" for b in meta["bands"]]
+        assert order == data.SSL4EO_S2_BANDS
+
+
+def test_ssl4eo_inputs_zero_fill_brick_kiln_style():
+    kiln = [
+        "B01",
+        "B02",
+        "B03",
+        "B04",
+        "B05",
+        "B07",
+        "B8A",
+        "B08",
+        "B11",
+        "B12",
+        "TCI_R",
+        "TCI_G",
+        "TCI_B",
+    ]
+    inputs, zero, dropped = ssl4eo_inputs(kiln)
+    assert inputs == data.SSL4EO_S2_BANDS
+    assert zero == ["B06", "B09", "B10"]
+    assert dropped == ["TCI_R", "TCI_G", "TCI_B"]
 
 
 def _ssl4eo_cached() -> bool:
@@ -179,21 +219,34 @@ def _ssl4eo_cached() -> bool:
 
 
 @pytest.mark.skipif(not _ssl4eo_cached(), reason="SSL4EO resnet50 weights not downloaded")
-def test_ssl4eo_first_layer_is_picked_by_band_name():
+def test_ssl4eo_model_loads_all_13_pretrained_filters():
     from torchgeo.models import ResNet50_Weights
 
     from gotrain.engine.models import input_normalisation
 
     state = ResNet50_Weights.SENTINEL2_ALL_MOCO.get_state_dict(progress=False)
-    bands = ["B04", "B8A", "TCI_R"]  # TorchGeo order index 3 and 8; TCI_R is not Sentinel-2
-    spec = ModelSpec("classification", "resnet50", "ssl4eo_s2", bands, 2, [0, 0, 100], [1, 1, 50])
+    inputs, zero, _ = ssl4eo_inputs(["B02", "B03", "B04"])
+    spec = ModelSpec(
+        "classification", "resnet50", "ssl4eo_s2", inputs, 2, [0] * 13, [1] * 13, zero_fill=zero
+    )
     model = build_model(spec)
-    w = model.state_dict()["conv1.weight"]
-    assert torch.equal(w[:, 0], state["conv1.weight"][:, 3])
-    assert torch.equal(w[:, 1], state["conv1.weight"][:, 8])
-    assert torch.allclose(w[:, 2], state["conv1.weight"].mean(1))
+    assert torch.equal(model.state_dict()["conv1.weight"], state["conv1.weight"])
     mean, std = input_normalisation(spec)
-    assert list(std) == [10000.0, 10000.0, 50.0] and mean[2] == 100.0
+    assert set(std.tolist()) == {10000.0} and set(mean.tolist()) == {0.0}
+
+
+@pytest.mark.skipif(not have("m-eurosat"), reason="m-eurosat not downloaded")
+def test_zero_filled_channels_are_zero():
+    ds = data.GeoBenchDataset(
+        "m-eurosat",
+        "val",
+        bands=["B04", "B06", "B03"],
+        norm=([0, 0, 0], [1, 1, 1]),
+        zero_fill=["B06"],
+        indices=range(2),
+    )
+    x, _ = ds[0]
+    assert float(x[1].abs().max()) == 0.0 and float(x[0].abs().max()) > 0
 
 
 # ------------------------------------------------------------------ train() never raises

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import warnings
 from collections import Counter
 from collections.abc import Sequence
@@ -65,6 +66,12 @@ CLASS_NAME_FIXES: dict[str, list[str]] = {
 
 # Standard Sentinel-2 MSI native resolutions, used instead of the stored metadata when band
 # names are corrected (the stored resolutions belong to the mislabelled names).
+# The 13 Sentinel-2 bands in the order TorchGeo's SSL4EO weights expect (B1..B8, B8a, B9..B12;
+# verified in torchgeo 0.10.1), spelled the GEO-Bench way. Bands a task lacks are zero-filled.
+SSL4EO_S2_BANDS = [
+    "B01", "B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B09", "B10", "B11", "B12",
+]  # fmt: skip
+
 S2_NATIVE_RES_M = {
     **dict.fromkeys(["B02", "B03", "B04", "B08"], 10),
     **dict.fromkeys(["B05", "B06", "B07", "B8A", "B11", "B12"], 20),
@@ -89,8 +96,9 @@ AERIAL_LETTERS = {"red": "r", "green": "g", "blue": "b", "nir": "n", "near-infra
 def find_task_dir(task_name: str, data_dir: str | Path | None = None) -> Path:
     """Locate <root>/<benchmark>/<task_name>/task_specs.pkl without import-time env tricks."""
     roots = [Path(data_dir)] if data_dir else []
-    if get_settings().geo_bench_dir:
-        roots.append(Path(get_settings().geo_bench_dir))
+    # Read GEO_BENCH_DIR directly: locating data must not need the agent's GOTRAIN_HOME.
+    if os.environ.get("GEO_BENCH_DIR"):
+        roots.append(Path(os.environ["GEO_BENCH_DIR"]).expanduser())
     roots += [REPO_ROOT / "data", Path.home() / "dataset" / "geobench"]
     for root in roots:
         for cand in sorted(root.glob(f"*/{task_name}")):
@@ -173,7 +181,14 @@ def task_type(task: Any) -> str:
 
 
 def sensor(task: Any) -> str:
-    """Sensor slug, e.g. 'sentinel-2' or 'aerial-rgb' (used to match memory lessons)."""
+    """Sensor slug, e.g. 'sentinel-2' or 'aerial-rgb' (used to match memory lessons).
+
+    Any task with Sentinel-2 bands is 'sentinel-2', even if it also carries derived channels
+    (m-brick-kiln's 8-bit TCI true-colour bands): combos.check_combo only allows ssl4eo_s2
+    weights on cards whose sensor normalises to 'sentinel2'.
+    """
+    if any(type(bi).__name__ == "Sentinel2" for bi in task.bands_info):
+        return "sentinel-2"
     kinds: list[str] = []
     for bi in task.bands_info:
         kind = type(bi).__name__
@@ -532,6 +547,14 @@ def _extra_notes(recon: dict) -> list[str]:
             f"{h * res:g} m x {w * res:g} m."
         )
     notes.append("Label integer i means class_names[i] (errata already applied).")
+    if recon["sensor"] == "sentinel-2":
+        zero = [b for b in SSL4EO_S2_BANDS if b not in recon["bands"]]
+        extra = [b for b in recon["bands"] if b not in SSL4EO_S2_BANDS]
+        msg = "With weights='ssl4eo_s2' the engine feeds the 13 SSL4EO bands in TorchGeo order"
+        msg += f"; zero-filled (missing here): {', '.join(zero)}" if zero else "; all present"
+        if extra:
+            msg += f"; left out (not Sentinel-2 reflectance): {', '.join(extra)}"
+        notes.append(msg + ".")
     ranges = recon.get("value_range") or {}
     p99 = {b: r["p99"] for b, r in ranges.items() if np.isfinite(r["p99"]) and r["p99"] > 0}
     if len(p99) >= 2:
@@ -625,6 +648,7 @@ class GeoBenchDataset:
     [H, W] mask (segmentation; values outside [0, n_classes) become IGNORE_INDEX).
 
     bands: "all" or band names (true names, errata applied), in the order the model wants.
+    zero_fill: band names in `bands` that this task lacks; fed as all-zero channels.
     norm:  "zscore"   (x - mean) / std with stats/<task>.json (TRAIN-only stats)
            "div10000" x / 10000, Sentinel-2 reflectance scale (what SSL4EO weights expect)
            "none"     raw values as float32
@@ -641,6 +665,7 @@ class GeoBenchDataset:
         data_dir: str | Path | None = None,
         allow_test: bool = False,
         cache: bool = False,
+        zero_fill: Sequence[str] = (),
     ) -> None:
         self.task_name = task_name
         self.split = split
@@ -651,10 +676,14 @@ class GeoBenchDataset:
         self.class_names = class_names_for(task_name, self.task)
         self.all_bands = channel_names(task_name, sample_array(self.ds[0])[1])[0]
         self.bands = list(self.all_bands) if bands == "all" else list(bands)
-        unknown = [b for b in self.bands if b not in self.all_bands]
+        self.zero_fill = [b for b in self.bands if b in set(zero_fill)]
+        unknown = [b for b in self.bands if b not in self.all_bands and b not in self.zero_fill]
         if unknown:
             raise ValueError(f"bands {unknown} not in {task_name}; available: {self.all_bands}")
-        self.channel_idx = [self.all_bands.index(b) for b in self.bands]
+        # -1 marks a zero-filled channel (a band the model expects but this task lacks)
+        self.channel_idx = [
+            -1 if b in self.zero_fill else self.all_bands.index(b) for b in self.bands
+        ]
         self.norm = norm
         self.mean, self.std = self._norm_params(norm)
         self.indices = list(indices) if indices is not None else list(range(len(self.ds)))
@@ -681,6 +710,8 @@ class GeoBenchDataset:
                 f"stats/{self.task_name}.json bands {stats.bands} != dataset bands "
                 f"{self.all_bands}; re-run scratch/explore.py"
             )
+        if self.zero_fill:
+            raise ValueError("zero-filled bands need explicit (mean, std) normalisation")
         mean = np.asarray(stats.mean, np.float32)[self.channel_idx]
         std = np.asarray(stats.std, np.float32)[self.channel_idx]
         return mean, np.where(std < 1e-6, 1.0, std).astype(np.float32)
@@ -719,7 +750,10 @@ class GeoBenchDataset:
         import torch
 
         arr, label = self.raw(i)
-        x = arr[..., self.channel_idx].astype(np.float32)
+        x = np.zeros(arr.shape[:2] + (len(self.bands),), dtype=np.float32)
+        for out_c, in_c in enumerate(self.channel_idx):
+            if in_c >= 0:
+                x[..., out_c] = arr[..., in_c]
         x = np.nan_to_num((x - self.mean) / self.std, nan=0.0, posinf=0.0, neginf=0.0)
         x = torch.from_numpy(np.ascontiguousarray(x.transpose(2, 0, 1)))
         return x, self._target(label)

@@ -1,6 +1,7 @@
 """Model menu for the real engine: any band count, three weight options, three task types.
 
-build_model(spec) returns a torch module plus the per-band normalisation it expects.
+Which backbone + weights combinations are allowed is decided by gotrain/engine/combos.py
+(Hilal's file, the single source of truth); this module only builds them.
 
 Weights:
   imagenet   timm (classification/multilabel) or segmentation_models_pytorch (U-Net) weights
@@ -8,26 +9,27 @@ Weights:
              adapted by the library (timm `adapt_input_conv`, smp `patch_first_conv`): the RGB
              filters are repeated across the C channels and rescaled by 3/C, so the layer's
              output scale stays the same. Inputs are z-scored with stats/<task>.json.
-  ssl4eo_s2  TorchGeo's Sentinel-2 SSL4EO MoCo weights (resnet18 / resnet50, 13 channels).
-             The first conv's filters are picked BY BAND NAME for the bands we feed, so any
-             subset or order works. Sentinel-2 bands are scaled /10000, exactly as in
-             pretraining; non-Sentinel-2 bands (e.g. brick-kiln's 8-bit TCI channels) get the
-             mean pretrained filter and a z-score. For segmentation the weights initialise the
-             U-Net's ResNet encoder (same layer names as timm's ResNet).
+  ssl4eo_s2  TorchGeo's Sentinel-2 SSL4EO MoCo weights (ResNet18/ResNet50_Weights.
+             SENTINEL2_ALL_MOCO), verified in torchgeo 0.10.1: 13 input channels in the order
+             B1..B8, B8a, B9..B12, pretrained on input / 10000. The model always receives those
+             13 channels in that order: the task's bands are reordered BY NAME, bands the task
+             lacks (m-brick-kiln: B06, B09, B10) are zero-filled, and non-Sentinel-2 bands
+             (brick-kiln's TCI_R/G/B) are left out. For segmentation the same weights
+             initialise the U-Net's ResNet encoder (same layer names as timm's ResNet).
   none       random initialisation, z-scored inputs.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 
-from gotrain.engine.data import S2_NATIVE_RES_M
+from gotrain.engine.data import SSL4EO_S2_BANDS
 
-SSL4EO_BACKBONES = ("resnet18", "resnet50")
 UNET_STRIDE = 32  # a 5-level U-Net halves the input 5 times
+SMP_ENCODER = {"convnext_tiny": "tu-convnext_tiny"}  # smp reaches convnext through timm
 
 
 @dataclass
@@ -35,15 +37,18 @@ class ModelSpec:
     task_type: str  # classification | multilabel | segmentation
     backbone: str
     weights: str  # imagenet | ssl4eo_s2 | none
-    bands: list[str]  # input channel names, in input order
+    bands: list[str]  # model input channels, in input order
     n_outputs: int  # logits per sample (or per pixel)
     band_mean: list[float]  # TRAIN z-score stats for these bands (same order)
     band_std: list[float]
+    zero_fill: list[str] = field(default_factory=list)  # input channels fed as zeros
 
 
-def geobench_name(torchgeo_band: str) -> str:
-    """TorchGeo 'B1' / 'B8a' -> GEO-Bench 'B01' / 'B8A'."""
-    return f"B{torchgeo_band[1:].upper().zfill(2)}"
+def ssl4eo_inputs(selected: list[str]) -> tuple[list[str], list[str], list[str]]:
+    """(13 model input bands, zero-filled bands, selected bands left out) for ssl4eo_s2."""
+    zero = [b for b in SSL4EO_S2_BANDS if b not in selected]
+    dropped = [b for b in selected if b not in SSL4EO_S2_BANDS]
+    return list(SSL4EO_S2_BANDS), zero, dropped
 
 
 def _ssl4eo_weights(backbone: str) -> Any:
@@ -53,66 +58,27 @@ def _ssl4eo_weights(backbone: str) -> Any:
     return enum.SENTINEL2_ALL_MOCO
 
 
-def check_spec(spec: ModelSpec) -> str | None:
-    """A human-readable reason this spec cannot be built, or None."""
-    if spec.weights == "ssl4eo_s2":
-        if spec.backbone not in SSL4EO_BACKBONES:
-            return (
-                f"weights 'ssl4eo_s2' exist only for backbones {list(SSL4EO_BACKBONES)}, "
-                f"not {spec.backbone!r}; use one of those or weights 'imagenet'"
-            )
-        if not any(b in S2_NATIVE_RES_M for b in spec.bands):
-            return "weights 'ssl4eo_s2' need Sentinel-2 bands (B01..B12, B8A); none selected"
-    if spec.task_type == "segmentation":
-        import segmentation_models_pytorch as smp
-
-        names = smp.encoders.get_encoder_names()
-        if spec.backbone not in names and not spec.backbone.startswith("tu-"):
-            return (
-                f"unknown U-Net encoder {spec.backbone!r}; try resnet18, resnet34, resnet50, "
-                "efficientnet-b0 or tu-convnext_tiny"
-            )
-    else:
-        import timm
-
-        if not timm.is_model(spec.backbone):
-            return (
-                f"unknown timm backbone {spec.backbone!r}; try resnet18, resnet50, "
-                "efficientnet_b0 or convnext_tiny"
-            )
-    return None
-
-
 def input_normalisation(spec: ModelSpec) -> tuple[np.ndarray, np.ndarray]:
     """Per-band (mean, std) to apply as (x - mean) / std, matching the chosen weights."""
-    mean = np.asarray(spec.band_mean, np.float32).copy()
-    std = np.asarray(spec.band_std, np.float32).copy()
-    if spec.weights == "ssl4eo_s2":
-        pretrained = {geobench_name(b) for b in _ssl4eo_weights(spec.backbone).meta["bands"]}
-        for i, band in enumerate(spec.bands):
-            if band in pretrained:
-                mean[i], std[i] = 0.0, 10000.0
+    if spec.weights == "ssl4eo_s2":  # exactly how the weights were pretrained
+        n = len(spec.bands)
+        return np.zeros(n, np.float32), np.full(n, 10000.0, np.float32)
+    mean = np.asarray(spec.band_mean, np.float32)
+    std = np.asarray(spec.band_std, np.float32)
     return mean, np.where(std < 1e-6, 1.0, std).astype(np.float32)
 
 
 def _ssl4eo_state(spec: ModelSpec) -> dict:
-    """SSL4EO state dict with conv1 reduced to our bands (by name), fc dropped."""
-    import torch
-
+    """SSL4EO state dict (13-channel conv1) without the classifier head."""
     weights = _ssl4eo_weights(spec.backbone)
+    order = [f"B{b[1:].upper().zfill(2)}" for b in weights.meta["bands"]]  # 'B8a' -> 'B8A'
+    if order != list(spec.bands):
+        raise RuntimeError(f"SSL4EO band order {order} != model inputs {spec.bands}")
     state = weights.get_state_dict(progress=True, check_hash=True, weights_only=True)
-    order = [geobench_name(b) for b in weights.meta["bands"]]
-    w = state["conv1.weight"]  # [64, 13, 7, 7]
-    mean_filter = w.mean(dim=1)
-    cols = [w[:, order.index(b)] if b in order else mean_filter for b in spec.bands]
-    state["conv1.weight"] = torch.stack(cols, dim=1).contiguous()
     return {k: v for k, v in state.items() if not k.startswith("fc.")}
 
 
 def build_model(spec: ModelSpec) -> Any:
-    problem = check_spec(spec)
-    if problem:
-        raise ValueError(problem)
     if spec.task_type == "segmentation":
         return _build_unet(spec)
     return _build_classifier(spec)
@@ -137,7 +103,7 @@ def _build_unet(spec: ModelSpec) -> Any:
     import segmentation_models_pytorch as smp
 
     model = smp.Unet(
-        encoder_name=spec.backbone,
+        encoder_name=SMP_ENCODER.get(spec.backbone, spec.backbone),
         encoder_weights="imagenet" if spec.weights == "imagenet" else None,
         in_channels=len(spec.bands),
         classes=spec.n_outputs,

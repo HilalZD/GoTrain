@@ -6,6 +6,7 @@ import pytest
 from conftest import make_config
 
 from gotrain.contracts import ModelVersion
+from gotrain.engine.fake import FakeEngine
 from gotrain.tools import (
     diagnose,
     final_test,
@@ -179,7 +180,7 @@ def test_tools_never_raise(budget, monkeypatch):
 
 
 def test_engine_crash_is_a_failed_trial_not_a_tool_error(budget, monkeypatch):
-    class Crashing:
+    class Crashing(FakeEngine):
         def train(self, *args, **kwargs):
             raise MemoryError("CUDA out of memory")
 

@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from gotrain.contracts import DatasetCard, EpochRecord, TrainConfig, TrainResult
+from gotrain.engine.combos import check_combo
 
 S2_BANDS = [
     "B01",
@@ -351,7 +352,7 @@ class FakeEngine:
             unknown = [b for b in config.bands if b not in card.bands]
             if unknown:
                 return f"bands {unknown} not in {config.task}; available: {card.bands}"
-        return None
+        return check_combo(card, config.backbone, config.weights)
 
     @staticmethod
     def _write_checkpoint(

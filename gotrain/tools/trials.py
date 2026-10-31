@@ -9,8 +9,9 @@ from typing import Any
 
 from pydantic import ValidationError
 
-from gotrain.contracts import TrainConfig, TrainResult, format_errors
+from gotrain.contracts import DatasetCard, TrainConfig, TrainResult, format_errors
 from gotrain.engine import get_engine
+from gotrain.engine.combos import check_combo
 from gotrain.tools._common import (
     append_entry,
     error,
@@ -153,16 +154,28 @@ def _row(entry: dict) -> dict:
     return row
 
 
-def _parse_config(task: str, index: int, raw: Any) -> TrainConfig | dict:
+def _parse_config(task: str, index: int, raw: Any, card: DatasetCard) -> TrainConfig | dict:
+    """A valid TrainConfig, or {"index", "error"} explaining what is wrong with it."""
     if not isinstance(raw, dict):
         return {"index": index, "error": f"config must be an object, got {type(raw).__name__}"}
     raw = {"task": task, **raw}
     if raw["task"] != task:
         return {"index": index, "error": f"config is for {raw['task']!r}, but task is {task!r}"}
     try:
-        return TrainConfig(**raw)
+        config = TrainConfig(**raw)
     except ValidationError as exc:
         return {"index": index, "error": format_errors(exc, TrainConfig)}
+    if problem := check_combo(card, config.backbone, config.weights):
+        return {"index": index, "error": problem}
+    return config
+
+
+def _dataset_card(task: str) -> DatasetCard | dict:
+    """The task's DatasetCard, or an error dict if the engine doesn't know the task."""
+    try:
+        return get_engine().describe_dataset(task)
+    except (ValueError, FileNotFoundError) as exc:
+        return error(str(exc), "Use the exact GEO-Bench task name, e.g. 'm-eurosat'.")
 
 
 # ---------------------------------------------------------------- tools
@@ -189,8 +202,11 @@ def run_trials(task: str, configs: list[dict], budget_minutes_per_trial: float) 
         )
     if problem := _budget_problem(task, budget_minutes_per_trial):
         return problem
+    card = _dataset_card(task)
+    if isinstance(card, dict):
+        return card
 
-    parsed = [_parse_config(task, i, raw) for i, raw in enumerate(configs)]
+    parsed = [_parse_config(task, i, raw, card) for i, raw in enumerate(configs)]
     invalid = [p for p in parsed if isinstance(p, dict)]
     ran, skipped = [], []
     for index, config in enumerate(parsed):
@@ -248,6 +264,11 @@ def promote(run_id: str, extra_budget_minutes: float) -> dict:
     config = TrainConfig.model_validate_json(
         storage().read_text(f"{run_key(task, run_id)}/config.json")
     )
+    card = _dataset_card(task)
+    if isinstance(card, dict):
+        return card
+    if problem := check_combo(card, config.backbone, config.weights):
+        return error(problem, "Submit a config with a valid combination via run_trials instead.")
     original = config.reason.split("Original reason: ")[-1]
     config = config.model_copy(
         update={"reason": f"Promoted {run_id} to {budget:g} min. Original reason: {original}"}

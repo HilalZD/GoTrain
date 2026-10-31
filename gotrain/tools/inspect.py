@@ -2,6 +2,7 @@
 
 from gotrain.contracts import DatasetCard
 from gotrain.engine import get_engine
+from gotrain.engine.combos import valid_combos_for
 from gotrain.tools._common import error, tool
 from gotrain.tools.memory import matching_lessons
 
@@ -28,6 +29,7 @@ def summarize_card(card: DatasetCard) -> dict:
         summary["imbalance_ratio"] = round(max(fractions.values()) / min(fractions.values()), 1)
     optional = ("dtype", "value_range", "label_format", "nodata_fraction", "constant_bands")
     summary.update({k: getattr(card, k) for k in optional if getattr(card, k) is not None})
+    summary["valid_backbones_by_weights"] = valid_combos_for(card)
     if card.sensor == "sentinel-2":
         summary["weights_hint"] = "Sentinel-2 task: default to weights='ssl4eo_s2'."
     return summary

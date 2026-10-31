@@ -44,8 +44,14 @@ tested once, later, by someone else.
 
 - **Prefer pretrained backbones.** For Sentinel-2 tasks use `weights="ssl4eo_s2"`; for RGB
   or aerial imagery use `"imagenet"`. Train from scratch (`"none"`) only as a contrast.
-- **Backbones that fit the T4 (16 GB):** resnet18, resnet34, resnet50, convnext_tiny.
-  Segmentation uses a U-Net/FPN decoder on top of these.
+- **Valid backbone + weights combinations.** Anything else is rejected before training:
+  - `weights="imagenet"` or `"none"`: resnet18, resnet34, resnet50, convnext_tiny
+  - `weights="ssl4eo_s2"`: resnet18 and resnet50 only, and only on Sentinel-2 tasks
+    (e.g. m-eurosat, m-brick-kiln). Never on aerial RGB / NAIP tasks (e.g. m-pv4ger-seg,
+    m-chesapeake-landcover).
+
+  `inspect_dataset` lists the options valid for the current task. Segmentation uses a
+  U-Net/FPN decoder on top of these backbones.
 - **Inputs are already normalised per band** using train-set statistics. You do not need to
   compensate for raw value ranges.
 - **Use flips + rot90.** Satellite images have no "up", so rotations are free extra data.

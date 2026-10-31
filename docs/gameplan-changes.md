@@ -69,3 +69,14 @@ The real engine plugs in through `gotrain/engine/interface.py`:
 
 Each task has a fixed GPU budget in minutes, set once by a human (`init_task_budget`).
 Tools refuse to start a trial that would exceed what remains. The agent cannot raise it.
+
+## Valid backbone + weights combinations (confirmed by Serena)
+
+| weights | backbones | tasks |
+|---|---|---|
+| `imagenet`, `none` | resnet18, resnet34, resnet50, convnext_tiny | all |
+| `ssl4eo_s2` | resnet18, resnet50 | Sentinel-2 only (m-eurosat, m-brick-kiln) |
+
+Anything else returns status "error" listing these options. The single source of truth is
+`gotrain/engine/combos.py` (`VALID_COMBOS`, `check_combo`). The tools reject invalid combos
+before training, and the fake engine fails on them the same way the real engine does.

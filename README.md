@@ -1,101 +1,138 @@
-# GoTrain
+# GoTrain 🛰️
 
-An AI agent that trains geospatial models on [GEO-Bench](https://github.com/ServiceNow/geo-bench)
-by itself. It explores the data, proposes configs, trains, scores on validation, and iterates.
-Built for the AUB ACM × RASID hackathon.
+**An AI agent that trains geospatial models on its own.**
+Give it a GEO-Bench dataset and a GPU time budget. It explores the data, plans how to spend its budget, screens ideas, looks at its own mistakes, verifies gains against seed noise, registers the best model, and packages it as a tool GoPilot can call through MCP. No human in the loop.
 
-> Status: scaffold. Contracts, a fake engine and tests are in place. The agent and tools are stubs.
+Built for the AUB ACM × RASID GoTrain Challenge (31 Oct – 1 Nov 2026) with Strands Agents, Claude Sonnet on Amazon Bedrock, and a SageMaker T4 GPU.
 
-## Quick start
+---
+
+## Results
+
+Tuned on **validation only**. The test split was touched **once per task**, at the end, by `final_test`.
+
+| Task | Type | Metric | Val (agent) | Test (agent, 95% CI) | Published reference | Human baseline (val) |
+|---|---|---|---|---|---|---|
+| m-eurosat | classification | accuracy | 0.986 | _pending_ | 0.982 (MoCo-RN50) / 0.986 (TerraFM) | 0.986 |
+| m-brick-kiln | classification | accuracy | 0.990 | _pending_ | 0.988 | — |
+| m-pv4ger-seg | segmentation | mIoU | 0.958 | _pending_ | 0.952 | 0.959 |
+| m-chesapeake | segmentation | mIoU (7 classes) | _pending_ | _pending_ | 0.708 (DINO-RN50) | — |
+
+Published references: Prithvi-EO-2.0 (arXiv 2412.02732, appendix A1–A4) and TerraFM (arXiv 2506.06281). Human baselines are hand-tuned scripts written by our team before the agent existed; only their **scores** are shown to the agent, never their settings.
+
+Full tables, model cards, journals and confidence intervals: [`results/summary.md`](results/summary.md).
+
+---
+
+## How the agent works
+
+```
+inspect & audit data → budget plan → screen ideas (successive halving)
+   → look at its own errors (vision) → promote the leader
+   → seed check (is the gain real?) → ensemble / TTA only if it beats the noise
+   → register → write lessons → export as a GoPilot tool
+```
+
+- **Budget plan first.** ~40% explore, 35% exploit, 25% confirm, with a reserve that the agent cannot spend before verifying its winner.
+- **Config-driven training.** The agent picks a validated `TrainConfig`; a fixed training engine executes it. Invalid combinations (wrong weights for a sensor, wrong loss for a task) are rejected before any GPU time is spent.
+- **Successive halving.** Many short trials, the best get more epochs.
+- **Visual self-diagnosis.** `diagnose` returns an image of the model's errors; the agent must write a visual observation and a hypothesis before its next action.
+- **Seed-verified decisions.** A gain only counts if it is larger than the spread across random seeds. The headline score is the seed-group mean ± std.
+- **Honest ensembles.** `evaluate_candidates` compares the single best run with 2- and 3-model ensembles, with and without test-time augmentation. On a tie, the simpler model wins.
+- **Goal-aware.** The agent knows the published reference for each task and stops exploring once it is close, spending the rest on verification.
+- **Memory.** Lessons are written at the end of every session (validation evidence only) and read at the start of the next.
+- **Data audit.** Before training, the agent reads an audit of the dataset: mislabelled class names, shortcut risks (majority-class baseline, flat tiles), train/val leaks.
+
+## Honesty by design
+
+- `split="test"` appears in exactly one file (`gotrain/tools/final_test.py`); a test enforces it.
+- The test phase is a separate agent with different tools, a typed confirmation, a lock file, and a **global append-only ledger** that refuses a second test on the same task from any folder.
+- Every tool call is logged as JSONL, plus a human-readable journal per session.
+- Bootstrap 95% confidence intervals on every test score.
+
+---
+
+## Install
 
 ```bash
 git clone https://github.com/HilalZD/GoTrain.git && cd GoTrain
-make install   # pip install -e ".[dev]"
-make test
-make lint
+make install            # pip install -e ".[dev]" (never upgrades torch/numpy)
+pytest -q               # full suite; engine tests need torch + data
 ```
 
-Everything runs on the **fake engine** by default (`GOTRAIN_ENGINE=fake`), so no GPU or data is needed.
+Environment:
 
-## Two homes
-
-All agent state (runs, registry, logs, lessons) lives in `GOTRAIN_HOME`, never in the repo.
-`GOTRAIN_HOME` must be set:
-
-| Home | Use it for |
+| Variable | Meaning |
 |---|---|
-| `~/gotrain_dev` | fake-engine runs and experiments. With the fake engine the name **must** end in `_dev` or contain `_dev_` (e.g. `~/gotrain_dev_serena`) |
-| `~/gotrain_home` | real training runs on SageMaker; the only home where a real final test may run (`GOTRAIN_OFFICIAL_HOME`) |
+| `GOTRAIN_HOME` | working folder (registry, runs, logs, memory) |
+| `GOTRAIN_ENGINE` | `fake` (instant, for development) or `real` (GPU) |
+| `GEO_BENCH_DIR` | where GEO-Bench data lives |
+| `GOTRAIN_DATA_CACHE` | pre-built data cache, default `~/data_cache` |
 
-The `_dev` rule means a fake run can never write fake results into the real registry or use up a
-real task's one-time test.
+Build the data cache once (CPU, train + val only):
+```bash
+python scripts/build_cache.py m-eurosat m-brick-kiln m-pv4ger-seg m-chesapeake
+```
 
-## Running the agent
+## Run
 
 ```bash
-export GOTRAIN_HOME=~/gotrain_home GOTRAIN_ENGINE=real
-gotrain run --task m-eurosat --budget-min 120 --phase tune
+# tune on validation
+gotrain run --task m-eurosat --budget-min 40 --phase tune
 
-# overnight on SageMaker (no tmux): one task at a time
-nohup python scripts/run_gotrain.py run --task m-eurosat --budget-min 120 \
-    > ~/gotrain_home/nohup-m-eurosat.out 2>&1 &
+# rehearse the final step on validation (no lock, no ledger)
+gotrain run --task m-eurosat --phase finalise --rehearsal
 
-# the ONE-TIME test evaluation: explicit phase + type the task name to confirm
+# the real, one-shot test (official home only)
 gotrain run --task m-eurosat --phase finalise
+
+# unattended queue of tasks (tune only), with a kill switch at ~/GOTRAIN_STOP
+bash scripts/launch_overnight.sh configs/overnight.yaml
+
+# copy results into the repo
+gotrain export --out results/ --home ~/gotrain_home
 ```
 
-Each session writes `logs/<task>/<session_id>.jsonl` (one JSON event per line) and a readable
-`<session_id>_journal.md` under `GOTRAIN_HOME`.
+## Use the models from GoPilot (MCP)
 
-## Why ML libraries are optional
+Every registered model is packaged automatically as a bundle with a model card, then served as an MCP tool:
 
-`torch`, `torchvision`, `timm`, `torchgeo` and `segmentation-models-pytorch` live in an
-optional extra, `ml`, and have **no version pins**.
-
-The SageMaker instance already has a CUDA build of torch that matches its GPU driver. If torch
-were a core dependency, or were pinned, a plain `pip install -e .` could download a different
-torch over it and break GPU training. So:
-
-- **On SageMaker:** `pip install -e .` (or `make install`). It uses the torch that's already there.
-- **On a fresh machine with no torch:** `pip install -e ".[ml,dev]"` (or `make install-ml`).
-
-Tip: run `pip install --dry-run -e .` on SageMaker first to see exactly what would change.
-
-## Configuration
-
-All settings are environment variables. See `gotrain/config.py`.
-
-| Variable | Default | Meaning |
-|---|---|---|
-| `GOTRAIN_ENGINE` | `fake` | `fake` or `real` training engine |
-| `GOTRAIN_STORAGE` | `local` | `local` or `s3` |
-| `GOTRAIN_BUCKET` | none | S3 bucket (required for `s3`) |
-| `GEO_BENCH_DIR` | none | where the GEO-Bench data lives |
-| `GOTRAIN_HOME` | **required** | root for `runs/`, `registry/`, `logs/`, `memory/` |
-| `GOTRAIN_STATS_DIR` | `<repo>/stats` | per-task band stats JSON |
-| `BEDROCK_MODEL_ID` | `eu.anthropic.claude-sonnet-5-5` | agent model |
-| `AWS_REGION` | `eu-central-1` | Bedrock region |
-| `GOTRAIN_FAKE_SLEEP_S` | `1.0` | seconds the fake engine sleeps per trial |
-| `GOTRAIN_OFFICIAL_HOME` | `~/gotrain_home` | the only home where a real final test may run |
-| `GOTRAIN_TEST_LEDGER` | `~/.gotrain_test_ledger.jsonl` | machine-wide record of every real test |
-
-## Layout
-
-```
-gotrain/            the package
-  contracts.py      Pydantic models passed between agent, tools and engine
-  config.py         env-var settings
-  engine/           training engines (interface, fake; real one by the ML side)
-  tools/            the agent's tools (plain typed functions)
-  prompts/          system prompts for the tune and finalise phases
-  agent.py          builds the Strands agent for one task and phase
-  audit.py          audit hook: JSONL log + journal of every session
-  storage.py        local storage (S3 stub)
-  cli.py            `gotrain run ...`
-stats/              per-band normalisation stats (train split)
-scripts/            run_gotrain.py (same as the CLI, nohup-friendly)
-tests/              pytest suite
-docs/               gameplan and its agreed changes
+```bash
+python -m gotrain.mcp.models_server     # list_models, detect_brick_kilns, segment_solar_panels, ...
+python scripts/demo_gopilot.py          # a Strands agent asks "Are there brick kilns in this tile?"
 ```
 
-See `CLAUDE.md` for the project rules and `docs/gameplan-changes.md` for the plan.
+Classification tools return a label, probabilities and confidence. Segmentation tools return a mask GeoTIFF, GeoJSON polygons and area per class. See [`docs/gopilot_export.md`](docs/gopilot_export.md).
+
+---
+
+## Repository
+
+```
+gotrain/
+  agent.py, driver.py, cli.py      agent phases, continuations, CLI
+  contracts.py, config.py          Pydantic schemas and settings
+  tools/                           inspect, trials, search, diagnose, candidates,
+                                   registry, final_test, memory
+  engine/                          interface, fake engine, real engine
+                                   (data, models, train, diagnostics, audit),
+                                   rules, combos, throughput
+  prompts/                         tune.md, finalise.md
+  knowledge/targets.json           published scores (scores only, no recipes)
+  mcp/models_server.py             GoPilot-ready MCP server
+scripts/                           overnight queue, cache builder, demo
+configs/                           overnight and smoke plans
+docs/                              gameplan, contract, data notes, figures
+results/                           exported leaderboards, cards, journals
+tests/                             ~400 tests
+```
+
+## Production roadmap
+
+- Storage backend on S3 (local filesystem today) for datasets, checkpoints and model versions.
+- GoTrain itself as an MCP server for GoPilot: `train`, `status`, `find_model`, `predict`.
+- Parallel trials across several GPUs, with the same budget ledger.
+
+## Team
+
+Hilal Zeidan (agent, tools, MCP) · Serena (data, training engine, diagnostics) — AUB.

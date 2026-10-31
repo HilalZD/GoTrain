@@ -123,8 +123,8 @@ trial finished only one epoch of the 15k-sample train split.
     short_minutes", naming those runs. This is the check that catches the brick-kiln
     incident: its spread (0.016) was above 0.005, but every trial ran a single epoch.
 
-  On train splits over 5,000 samples the agent screens with `train_subset_frac` 0.2-0.3
-  (`inspect_dataset` adds a `screening_hint`).
+  The >5,000-samples rule for `screening_hint` was replaced by an epoch-time estimate; see
+  "Sizing the screen" below.
 - **Seed-check reserve is deliberately strict** (agreed): it covers a seed check of today's
   best *or* the promoted child, whichever costs more, because a winning child is what gets
   registered.
@@ -162,3 +162,67 @@ trial finished only one epoch of the 15k-sample train split.
 half of the explore share remains, the agent re-screens with `short_minutes` of at least
 3 x the observed `minutes_per_epoch` (the warning states that number) instead of trusting the
 ranking.
+
+## After the first live m-pv4ger-seg run
+
+That run showed two gaps: after `diagnose` showed the image, the agent made its next tool
+call without writing the VISUAL OBSERVATION (it only appeared in the final summary); and its
+first `run_halving` round ran 6 trials at 1.5 min on full data, all of which timed out with 0
+epochs, wasting 9 min.
+
+- **Observation gate (enforced, tune phase).** A Strands hook (`ObservationGate`,
+  `BeforeToolCallEvent.cancel_tool`) arms after a successful `diagnose` and cancels every
+  tool call (any tool) until an assistant message contains both "VISUAL OBSERVATION" and
+  "HYPOTHESIS" (case-insensitive). Writing them in the same message as the next tool call
+  counts. The cancel message says exactly what to write. Every block is an
+  `observation_enforced` audit event, and the release is an `observation_written` event.
+  `diagnose`'s text result ends with "Next: write VISUAL OBSERVATION and HYPOTHESIS before
+  any other tool call." Blocked calls count toward the tool-call limit, so an agent that
+  never complies is still stopped.
+- **Fail fast.** In `run_trials` and rung 1 of `run_halving`, a trial that ends with status
+  "timeout" and 0 epochs stops the round at once: the remaining configs never start and are
+  listed in `not_run`, only the minutes actually used are charged, rung 2 is skipped
+  (`stopped_early: true`), and a warning says how long the trial ran and which
+  `train_subset_frac` / minutes would fit 3 epochs. Errors (e.g. invalid bands) don't stop
+  the round.
+- **Sizing the screen** (`gotrain/engine/throughput.py`). A deliberately simple heuristic:
+
+      minutes_per_epoch ~= train_samples x train_subset_frac x height x width / PIXELS_PER_MINUTE
+
+  `PIXELS_PER_MINUTE` (20,000 64x64 images per minute) is exactly the fake engine's timing
+  model; the fake engine computes epoch time with this function and states the model in
+  `describe_dataset`'s notes. `inspect_dataset` returns a `screening_hint` when 3 full-data
+  epochs don't fit in a 2-minute screening trial, with the `train_subset_frac` (or
+  `short_minutes`) that would fit. With the fake numbers: m-eurosat 0.1 min/epoch (no hint),
+  m-brick-kiln 0.75, m-chesapeake-landcover 2.4, m-pv4ger-seg 3.75 (hint: subsample <= 0.15).
+  **For the real engine the constant is a placeholder** until measured on the T4; observed
+  `minutes_per_epoch` from trials beats the estimate.
+
+## Harness fix: sessions that ended early (second live m-pv4ger-seg run)
+
+After `diagnose`, the agent put its observation in a config's `reason`, was blocked 4
+times, then wrote VISUAL OBSERVATION + HYPOTHESIS as a text-only message ("I'm about to run
+them"). In Strands a text-only reply ends the agent loop, so the session finished with 26 of
+40 minutes unused and nothing registered.
+
+- **Gate message and tool-args acceptance.** The `ObservationGate` cancel text now says:
+  "write VISUAL OBSERVATION and HYPOTHESIS as plain text in your message AND include your
+  next tool call in the SAME response; do not end your turn." The gate also accepts the
+  observation when the blocked call's own arguments (e.g. a config `reason`) contain both
+  keywords. `observation_written` events record the `source` (`message` or `tool_args`).
+- **Continuations** (`gotrain/driver.py`, used by the CLI). When a tune session ends its
+  turn while budget remains above the cost of one short trial (the cheapest per-trial
+  budget used so far, or 2 min) and the agent has registered nothing in this session, the
+  driver sends "Continue your plan. Remaining budget: X min. Remember to finish with
+  register_model." Up to 3 per session, each a `continuation` audit event and a journal
+  line; a 4th is refused (`continuations_exhausted`). No continuation once the tool-call
+  limit has ended the loop, and none in the finalise phase.
+- **Registration safety net.** If a tune session ends with nothing registered in it but a
+  successful run exists, the driver registers the best run by validation (a seed group
+  counts by its mean, registered via its base run) with the notes "auto-registered by
+  harness: agent did not register", plus the basis. Audit event `auto_registered`; the
+  journal shows "HARNESS: AUTO-REGISTERED ... not chosen by the agent"; the CLI prints a
+  warning; `session_end` records `registered_by: "harness"`. If the best run is already
+  registered from an earlier session, nothing is duplicated (`auto_register_failed`).
+- **Prompt.** Never end a turn with a text-only reply while the plan and budget remain;
+  write observations in the same response as the next tool call.

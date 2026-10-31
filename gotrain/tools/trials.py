@@ -12,6 +12,11 @@ from pydantic import ValidationError
 from gotrain.contracts import DatasetCard, TrainConfig, TrainResult, format_errors
 from gotrain.engine import get_engine
 from gotrain.engine.combos import check_combo
+from gotrain.engine.throughput import (
+    SCREEN_EPOCHS,
+    estimate_minutes_per_epoch,
+    subset_for_epochs,
+)
 from gotrain.tools._common import (
     append_entry,
     error,
@@ -194,6 +199,58 @@ def _row(entry: dict, *extra_keys: str) -> dict:
     return row
 
 
+def is_dead_on_arrival(entry: dict) -> bool:
+    """A trial that timed out before finishing a single epoch: its siblings will too."""
+    return entry["status"] == "timeout" and entry["epochs"] == 0
+
+
+def timeout_warning(entry: dict, config: TrainConfig, card: DatasetCard, minutes_arg: str) -> str:
+    """Why the round stopped, how long the trial ran, and what would make an epoch fit."""
+    side = config.img_size
+    train = card.split_sizes["train"]
+    per_epoch = estimate_minutes_per_epoch(train, side, side, config.train_subset_frac)
+    full_epoch = estimate_minutes_per_epoch(train, side, side)
+    budget = entry["budget_minutes"]
+    return (
+        f"Stopped the round: trial {entry['run_id']} ran {entry['minutes']:g} min and timed "
+        f"out before finishing one epoch (one epoch at img_size={side}, "
+        f"train_subset_frac={config.train_subset_frac:g} is estimated at ~{per_epoch:.1f} min). "
+        f"The remaining configs were not started. For {SCREEN_EPOCHS} epochs in {budget:g} min "
+        f"use train_subset_frac <= {subset_for_epochs(full_epoch, budget):g}, and/or "
+        f"{minutes_arg} >= {SCREEN_EPOCHS * per_epoch:.1f}."
+    )
+
+
+def _run_batch(
+    task: str,
+    pending: list[tuple[int, TrainConfig]],
+    minutes: float,
+    card: DatasetCard,
+    minutes_arg: str,
+    **extra: Any,
+) -> dict:
+    """Run (index, config) pairs one by one; stop at the first 0-epoch timeout (fail fast).
+
+    Returns {"ran", "skipped" (no budget), "not_run" (never started), "warnings"}. Only the
+    minutes each trial actually used are charged.
+    """
+    out: dict = {"ran": [], "skipped": [], "not_run": [], "warnings": []}
+    for position, (index, config) in enumerate(pending):
+        if problem := _budget_problem(task, minutes):
+            out["skipped"].append({"index": index, "reason": problem["error"]})
+            continue
+        entry = _execute_trial(config, minutes, None, **extra)
+        out["ran"].append(entry)
+        if is_dead_on_arrival(entry):
+            out["warnings"].append(timeout_warning(entry, config, card, minutes_arg))
+            out["not_run"] = [
+                {"index": i, "reason": "not started: the round stopped after a 0-epoch timeout"}
+                for i, _ in pending[position + 1 :]
+            ]
+            break
+    return out
+
+
 def _parse_config(task: str, index: int, raw: Any, card: DatasetCard) -> TrainConfig | dict:
     """A valid TrainConfig, or {"index", "error"} explaining what is wrong with it."""
     if not isinstance(raw, dict):
@@ -226,7 +283,8 @@ def run_trials(task: str, configs: list[dict], budget_minutes_per_trial: float) 
     """Validate configs, run the valid ones one by one, return them ranked by val score.
 
     Invalid configs are reported with the reason and skipped; the rest still run.
-    A trial that would exceed the remaining budget is not started.
+    A trial that would exceed the remaining budget is not started. If a trial times out
+    before finishing one epoch, the batch stops: the rest are listed in "not_run".
 
     Args:
         task: GEO-Bench task name, e.g. "m-eurosat".
@@ -248,21 +306,17 @@ def run_trials(task: str, configs: list[dict], budget_minutes_per_trial: float) 
 
     parsed = [_parse_config(task, i, raw, card) for i, raw in enumerate(configs)]
     invalid = [p for p in parsed if isinstance(p, dict)]
-    ran, skipped = [], []
-    for index, config in enumerate(parsed):
-        if not isinstance(config, TrainConfig):
-            continue
-        if problem := _budget_problem(task, budget_minutes_per_trial):
-            skipped.append({"index": index, "reason": problem["error"]})
-            continue
-        ran.append(_execute_trial(config, budget_minutes_per_trial, parent=None))
+    pending = [(i, c) for i, c in enumerate(parsed) if isinstance(c, TrainConfig)]
+    batch = _run_batch(task, pending, budget_minutes_per_trial, card, "budget_minutes_per_trial")
 
     best = rank(load_entries(task))[0] if load_entries(task) else None
     out = {
         "task": task,
-        "trials": [_row(e) for e in rank(ran)],
+        "trials": [_row(e) for e in rank(batch["ran"])],
         "invalid": invalid,
-        "skipped": skipped,
+        "skipped": batch["skipped"],
+        "not_run": batch["not_run"],
+        "warnings": batch["warnings"],
         "best_overall": _row(best) if best else None,
         **seed_check_status(task),
     }

@@ -34,9 +34,13 @@ current best.** Every training tool's output tells you `seed_check_cost_min` and
    near-duplicates. Rung 1 screens every config cheaply (`short_minutes`); only the
    `keep_top` best are re-trained for `long_minutes`. The tool refuses a round that doesn't
    fit the budget and suggests a smaller one.
-   - **Large datasets (train split > 5,000 samples): screen with `train_subset_frac`
-     0.2–0.3**, so short trials complete several epochs instead of one. Rung 2 can use the
-     full data.
+   - **Size the screen before the first round.** If `inspect_dataset` returns a
+     `screening_hint` (an epoch-time estimate from image size x sample count), follow it:
+     screen with the `train_subset_frac` or `short_minutes` it gives, so rung-1 trials
+     complete several epochs. Rung 2 can use the full data.
+   - If a trial times out before finishing one epoch, the tool **stops the round at once**
+     (`stopped_early`; unstarted configs are in `not_run`) and its warning says what would
+     fit. Resubmit with that subsample or minutes; don't retry the same setting.
    - Every trial row shows `minutes_per_epoch`. **If the rung-1 epoch warning fires and at
      least half of the explore share remains, re-screen with `short_minutes` of at least
      3 x the observed `minutes_per_epoch`** (or subsample) instead of trusting the ranking.
@@ -48,7 +52,9 @@ current best.** Every training tool's output tells you `seed_check_cost_min` and
 3. **Diagnose the leaders** with `diagnose`: is the curve overfitting, underfitting or fine?
    Which classes fail, and what are they confused with? When an error grid is attached
    (rows of image | truth | prediction for the worst validation samples), look at it, then
-   **always write, right after every diagnose:**
+   **always write, right after every diagnose**, as plain text in the same response as your
+   next tool call (other tool calls are blocked until you do; never send the observation
+   as a text-only reply, because that ends your turn):
    - **VISUAL OBSERVATION:** what the worst predictions have in common (e.g. "thin panel
      edges are missed; small panels vanish entirely").
    - **HYPOTHESIS:** a fix linked to that observation (e.g. "misses thin panel edges ->
@@ -77,6 +83,9 @@ current best.** Every training tool's output tells you `seed_check_cost_min` and
 # Rules
 
 - **State your reason before every tool call**, in one or two sentences.
+- **Never end your turn with a text-only reply while you still have a plan and budget.** A
+  reply without a tool call ends the session. Put your reasoning and the next tool call in
+  the same response. The session is only finished after `register_model`.
 - **One change per hypothesis when refining.** If you change lr and loss together, you
   cannot tell which one helped.
 - **End every round with two short headings:** "What I learned" and "What I'll try next".

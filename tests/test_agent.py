@@ -27,7 +27,8 @@ TASK = "m-eurosat"
 
 class ScriptedModel(Model):
     """Replays a fixed list of assistant turns. Each turn is a list of
-    ("text", str) or ("tool", name, input) blocks; when the script runs out it says "done"."""
+    ("text", str) or ("tool", name, input) blocks, or a function returning one; when the
+    script runs out it says "done"."""
 
     def __init__(self, turns: list[list[tuple]], repeat_last: bool = False):
         self.turns = list(turns)
@@ -48,6 +49,8 @@ class ScriptedModel(Model):
             turn = self.turns.pop(0)
         else:
             turn = self.turns[0] if self.turns else [("text", "done")]
+        if callable(turn):  # built at call time, e.g. to use a run_id made earlier
+            turn = turn()
         yield {"messageStart": {"role": "assistant"}}
         for block in turn:
             if block[0] == "text":

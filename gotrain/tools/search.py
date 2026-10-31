@@ -30,6 +30,7 @@ from gotrain.tools.trials import (
     _execute_trial,
     _parse_config,
     _row,
+    _run_batch,
     budget_status,
     seed_check_status,
 )
@@ -107,7 +108,9 @@ def run_halving(
     re-trained with long_minutes as child runs (parent = their rung-1 run). The whole round's
     cost (n * short + keep_top * long) is checked against the budget before anything starts.
     "screening_spread" is best minus worst rung-1 score; "warnings" flags an unreliable screen
-    (spread under 0.005, or rung-1 trials that finished fewer than 3 epochs).
+    (spread under 0.005, or rung-1 trials that finished fewer than 3 epochs). If a rung-1
+    trial times out before one epoch, the round stops at once ("stopped_early"); configs
+    that never started are listed in "not_run".
 
     Args:
         task: GEO-Bench task name, e.g. "m-eurosat".
@@ -152,7 +155,24 @@ def run_halving(
         )
 
     halving_id = f"h-{uuid.uuid4().hex[:6]}"
-    rung1 = [_execute_trial(c, short_minutes, None, rung=1, halving_id=halving_id) for c in valid]
+    pending = [(i, c) for i, c in enumerate(parsed) if isinstance(c, TrainConfig)]
+    batch = _run_batch(
+        task, pending, short_minutes, card, "short_minutes", rung=1, halving_id=halving_id
+    )
+    rung1 = batch["ran"]
+    base = {"task": task, "halving_id": halving_id, "estimated_cost_min": round(cost, 3)}
+    if batch["not_run"] or batch["warnings"]:  # fail fast: a 0-epoch timeout stops the round
+        return base | {
+            "stopped_early": True,
+            "trials": [_row(e, *HALVING_ROW_KEYS) for e in rung1],
+            "winner": None,
+            "screening_spread": None,
+            "warnings": batch["warnings"],
+            "not_run": batch["not_run"],
+            "invalid": invalid,
+            "skipped": batch["skipped"],
+            **seed_check_status(task),
+        }
     survivors = sorted((e for e in rung1 if e["status"] == "ok"), key=lambda e: -e["val_score"])[
         :keep_top
     ]
@@ -171,15 +191,14 @@ def run_halving(
 
     finalists = [e for e in rung2 if e["status"] == "ok"] + carried or survivors
     winner = max(finalists, key=lambda e: e["val_score"]) if finalists else None
-    return {
-        "task": task,
-        "halving_id": halving_id,
-        "estimated_cost_min": round(cost, 3),
+    return base | {
+        "stopped_early": False,
         "trials": [_row(e, *HALVING_ROW_KEYS) for e in rung1 + rung2],
         "winner": _row(winner, *HALVING_ROW_KEYS) if winner else None,
         **screening_summary(rung1),
+        "not_run": [],
         "invalid": invalid,
-        "skipped": skipped,
+        "skipped": batch["skipped"] + skipped,
         **seed_check_status(task),
     }
 

@@ -1,7 +1,7 @@
 {
   "task": "m-eurosat",
   "task_type": "classification",
-  "sensor": "Sentinel-2",
+  "sensor": "sentinel-2",
   "bands": [
     "B01",
     "B02",

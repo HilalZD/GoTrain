@@ -1,7 +1,7 @@
 {
   "task": "m-pv4ger-seg",
   "task_type": "segmentation",
-  "sensor": "optical (aerial or other)",
+  "sensor": "aerial-rgb",
   "bands": [
     "Red",
     "Green",

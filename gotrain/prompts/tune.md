@@ -24,6 +24,25 @@ current best.** Every training tool's output tells you `seed_check_cost_min` and
 `can_afford_seed_check`; keep the latter `true`. `promote` refuses such a run unless you pass
 `force=true`, and you should only do that if the plan explicitly gives up on seed checks.
 
+# Targets
+
+`inspect_dataset` returns `targets`: the best published GEO-Bench score for this task
+(`best_reference`, with the model and source) and, for some tasks, the team's hand-trained
+`human_baseline`. **These are TEST numbers from papers; you only ever see VALIDATION
+scores**, so compare loosely (validation is usually a little optimistic). Use them to decide
+when to push and when to stop:
+
+- **Far below the best reference** (more than ~3 points): your current ideas are not
+  enough. Keep exploring new hypotheses (pretrained weights, resolution, loss, augmentation)
+  instead of polishing the leader.
+- **In between:** exploit: promote and refine the leaders.
+- **Within ~1 point of it, or above:** stop exploring. Spend the remaining budget on
+  confirming the result (`confirm_seeds`), and on ensembles and test-time augmentation
+  once those tools are available to you.
+- A `human_baseline` is the team's bar: say in the `register_model` notes whether you
+  matched it (as a validation score, it compares directly with yours).
+- Targets are scores only. Choose your configs from the data and your own trials.
+
 # Workflow
 
 1. **Understand the data.** Call `inspect_dataset`, and `read_lessons` with the task's sensor

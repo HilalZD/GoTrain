@@ -1,0 +1,61 @@
+{
+  "about": "Published GEO-Bench reference scores per task. SCORES ONLY: never add hyperparameters or training recipes here. Values are fractions (0.9816 = 98.16%). Reference values are TEST-split results from papers; the agent only ever sees validation scores.",
+  "tasks": {
+    "m-eurosat": {
+      "metric": "accuracy",
+      "references": [
+        {
+          "value": 0.9816,
+          "split": "test",
+          "model": "MoCo ResNet50",
+          "source": "Prithvi-EO-2.0 paper, appendix"
+        },
+        {
+          "value": 0.986,
+          "split": "test",
+          "model": "TerraFM (fine-tuned)",
+          "source": "TerraFM, fine-tuned result (citation to be added)"
+        }
+      ],
+      "human_baseline": {
+        "value": 0.986,
+        "split": "val",
+        "model": "hand-trained baseline",
+        "source": "Serena's hand-trained baseline (scripts/baseline_eurosat.py)"
+      }
+    },
+    "m-brick-kiln": {
+      "metric": "accuracy",
+      "references": [
+        {
+          "value": 0.9879,
+          "split": "test",
+          "model": "Prithvi-EO-2.0-600M",
+          "source": "Prithvi-EO-2.0 (citation to be added)"
+        }
+      ]
+    },
+    "m-pv4ger-seg": {
+      "metric": "miou",
+      "references": [
+        {
+          "value": 0.9523,
+          "split": "test",
+          "model": "Prithvi-EO-2.0-600M",
+          "source": "Prithvi-EO-2.0 (citation to be added)"
+        }
+      ]
+    },
+    "m-chesapeake-landcover": {
+      "metric": "miou",
+      "references": [
+        {
+          "value": 0.7081,
+          "split": "test",
+          "model": "DINO ResNet50",
+          "source": "citation to be added"
+        }
+      ]
+    }
+  }
+}

@@ -5,6 +5,7 @@ from gotrain.engine import get_engine
 from gotrain.engine.combos import valid_combos_for
 from gotrain.engine.rules import rules_for
 from gotrain.engine.throughput import screening_advice
+from gotrain.knowledge.targets import targets_for
 from gotrain.tools._common import error, tool
 from gotrain.tools.memory import matching_lessons
 
@@ -42,7 +43,7 @@ def summarize_card(card: DatasetCard) -> dict:
 
 @tool
 def inspect_dataset(task: str) -> dict:
-    """DatasetCard summary for `task` and the lessons tagged with its sensor or task type.
+    """DatasetCard summary, published reference scores (targets), and matching lessons.
 
     Args:
         task: GEO-Bench task name, e.g. "m-eurosat".
@@ -52,4 +53,4 @@ def inspect_dataset(task: str) -> dict:
     except (ValueError, FileNotFoundError) as exc:
         return error(str(exc), "Use the exact GEO-Bench task name, e.g. 'm-eurosat'.")
     lessons = matching_lessons([card.sensor, card.task_type, card.task])
-    return {"dataset": summarize_card(card), "lessons": lessons}
+    return {"dataset": summarize_card(card), "targets": targets_for(task), "lessons": lessons}

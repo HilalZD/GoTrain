@@ -17,7 +17,7 @@ from PIL import Image, ImageDraw
 from gotrain.config import REPO_ROOT
 from gotrain.contracts import DatasetCard, EpochRecord, TrainConfig, TrainResult
 from gotrain.engine.rules import check_config
-from gotrain.engine.throughput import PIXELS_PER_MINUTE, estimate_minutes_per_epoch
+from gotrain.engine.throughput import TimingModel, estimate_minutes_per_epoch
 
 S2_BANDS = [
     "B01",
@@ -227,18 +227,25 @@ def target_score(config: TrainConfig, card: DatasetCard, rng: random.Random) -> 
     return score + config_offset + rng.gauss(0, SEED_NOISE_STD)
 
 
+# Deliberately ~12x slower than the real T4 (throughput.REAL_T4): at real speed an m-eurosat
+# epoch takes ~2 s, so every dev trial would finish all its epochs in a fraction of a minute
+# and budgets, halving, fail-fast and the epoch warnings would never be exercised at the
+# scale of real segmentation runs. Train images only, no per-image overhead.
+FAKE_TIMING = TimingModel(name="fake engine", pixels_per_minute=20_000 * 64 * 64, counts_val=False)
+
+
 def minutes_per_epoch(config: TrainConfig, card: DatasetCard) -> float:
-    """The shared throughput model: epoch time scales with pixels seen (a 0.25 subsample
-    fits ~4x the epochs)."""
+    """Epoch time scales with pixels seen (a 0.25 subsample fits ~4x the epochs)."""
     side = config.img_size
     return estimate_minutes_per_epoch(
-        card.split_sizes["train"], side, side, config.train_subset_frac
+        card.split_sizes["train"], side, side, config.train_subset_frac, timing=FAKE_TIMING
     )
 
 
 TIMING_NOTE = (
     "Fake engine timing: one epoch takes train_samples x train_subset_frac x img_size^2 / "
-    f"{PIXELS_PER_MINUTE / 1e6:.2f}M pixels per minute, plus {SETUP_MINUTES} min setup per trial."
+    f"{FAKE_TIMING.pixels_per_minute / 1e6:.2f}M pixels per minute, plus {SETUP_MINUTES} min "
+    "setup per trial."
 )
 
 

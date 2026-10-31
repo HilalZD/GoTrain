@@ -308,3 +308,39 @@ Full spec for the real engine: `docs/contract-v2.md`. Backward compatible with v
     refused if the ledger already has the task, in any status, from any home.
   - Fake-engine tests stay per-home and never touch the ledger.
 - **Impact:** none. No real test evaluation had been run.
+
+## Calibrated timing (real T4)
+
+- **Measurement** (SageMaker T4; m-eurosat, resnet50, batch 64, fp16; 2,000 train + 1,000 val
+  images per epoch): ~1.9 s per epoch at 64 px, ~10 s at 224 px.
+- **Model** (`gotrain/engine/throughput.py`, `REAL_T4`, the one place to update): seconds per
+  image = pixels / 1,024 Mpx/min + 0.393 ms overhead, for train *and* val images. One
+  pixels-per-minute constant can't fit both points (~388 vs ~903 Mpx/min): small images are
+  dominated by a fixed per-image cost. The two terms reproduce both measurements exactly.
+- **Pending:** segmentation (U-Net) timings from Serena's M3; until then segmentation
+  estimates use the classification calibration and are probably optimistic.
+- **Fake engine keeps its own, slower `FAKE_TIMING`** (20,000 64x64 images per minute, train
+  only). At real speed every dev trial would finish all its epochs in seconds, so budgets,
+  halving, fail-fast and the epoch warnings would never be exercised. Hints and fail-fast
+  advice use the active engine's model, so they stay consistent in dev runs too.
+
+## Goal-aware agent: published reference scores
+
+- `gotrain/knowledge/targets.json` holds, per task, published GEO-Bench reference **TEST**
+  scores (metric, value as a fraction, model, source), plus a `human_baseline` for m-eurosat
+  (Serena's hand-trained model, val accuracy 0.986):
+
+  | Task | Metric | Best reference | Model |
+  |---|---|---|---|
+  | m-eurosat | accuracy | 0.986 (also 0.9816, MoCo ResNet50) | TerraFM (fine-tuned) |
+  | m-brick-kiln | accuracy | 0.9879 | Prithvi-EO-2.0-600M |
+  | m-pv4ger-seg | mIoU | 0.9523 | Prithvi-EO-2.0-600M |
+  | m-chesapeake-landcover | mIoU | 0.7081 | DINO ResNet50 |
+
+- **Scores only.** The schema forbids any other key, and a test fails if the file contains a
+  hyperparameter-like key (lr, backbone, batch_size, ...): humans never pick hyperparameters.
+- `inspect_dataset` returns the task's `targets` (with `best_reference` and a note that these
+  are test numbers while the agent sees validation scores). The tune prompt uses them:
+  far below (> ~3 points) explore more; in between exploit; within ~1 point or above stop
+  exploring and spend the rest on seed checks (and ensembles/TTA once those tools exist).
+- **To do:** some sources are recorded as "citation to be added".

@@ -43,7 +43,7 @@ gotrain = "gotrain.cli:main"
 include = ["gotrain*"]
 
 [tool.setuptools.package-data]
-gotrain = ["prompts/*.md"]
+gotrain = ["prompts/*.md", "knowledge/*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

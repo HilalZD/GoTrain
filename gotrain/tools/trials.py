@@ -14,7 +14,7 @@ from gotrain.engine import get_engine
 from gotrain.engine.rules import check_config
 from gotrain.engine.throughput import (
     SCREEN_EPOCHS,
-    estimate_minutes_per_epoch,
+    card_minutes_per_epoch,
     subset_for_epochs,
 )
 from gotrain.tools._common import (
@@ -207,17 +207,16 @@ def is_dead_on_arrival(entry: dict) -> bool:
 def timeout_warning(entry: dict, config: TrainConfig, card: DatasetCard, minutes_arg: str) -> str:
     """Why the round stopped, how long the trial ran, and what would make an epoch fit."""
     side = config.img_size
-    train = card.split_sizes["train"]
-    per_epoch = estimate_minutes_per_epoch(train, side, side, config.train_subset_frac)
-    full_epoch = estimate_minutes_per_epoch(train, side, side)
+    per_epoch = card_minutes_per_epoch(card, side, config.train_subset_frac)
     budget = entry["budget_minutes"]
+    frac = subset_for_epochs(card, budget, side)
+    subset = f"use train_subset_frac <= {frac:g}, and/or " if frac is not None else "use "
     return (
         f"Stopped the round: trial {entry['run_id']} ran {entry['minutes']:g} min and timed "
         f"out before finishing one epoch (one epoch at img_size={side}, "
         f"train_subset_frac={config.train_subset_frac:g} is estimated at ~{per_epoch:.1f} min). "
         f"The remaining configs were not started. For {SCREEN_EPOCHS} epochs in {budget:g} min "
-        f"use train_subset_frac <= {subset_for_epochs(full_epoch, budget):g}, and/or "
-        f"{minutes_arg} >= {SCREEN_EPOCHS * per_epoch:.1f}."
+        f"{subset}{minutes_arg} >= {SCREEN_EPOCHS * per_epoch:.1f}."
     )
 
 

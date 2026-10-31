@@ -111,7 +111,8 @@ def estimate_minutes(task: str, card: DatasetCard, candidate: Candidate) -> floa
         timing.minutes_per_image(side, side, seg)
         for side in (member_img_size(task, r) for r in candidate.run_ids)
     )
-    return card.split_sizes.get("val", 0) * views * per_view
+    overhead = timing.overhead_minutes(seg) * len(candidate.run_ids)  # once per member
+    return card.split_sizes.get("val", 0) * views * per_view + overhead
 
 
 def seed_noise(task: str) -> float | None:

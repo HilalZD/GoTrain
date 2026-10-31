@@ -18,6 +18,8 @@ images at 320 px): ~34 s per epoch. The classification rate predicts only ~21.8 
 segmentation gets its own pixel rate, keeping the same per-image overhead:
     34 = 3,403 x (320^2 / seg_pixels_per_second + 0.393 ms)        -> ~640 Mpx/min
 One measurement, one task: m-chesapeake (256 px, 4,000 images) is extrapolated (~26 s).
+Every trial also pays a fixed first-epoch overhead once: +19 s classification, +28 s
+segmentation (`TimingModel.overhead_minutes`), on top of the per-epoch time.
 **Update REAL_T4 here when new measurements arrive.**
 
 The fake engine has its own, slower FAKE_TIMING (gotrain/engine/fake.py), and hints use
@@ -42,6 +44,15 @@ class TimingModel:
     seconds_per_image: float = 0.0
     counts_val: bool = True  # whether each epoch's validation pass is part of the time
     seg_pixels_per_minute: float | None = None  # None: same rate as classification
+    first_epoch_s: float = 0.0  # fixed once-per-trial overhead (loading, cudnn warm-up, ...)
+    seg_first_epoch_s: float | None = None  # None: same as classification
+
+    def overhead_minutes(self, segmentation: bool = False) -> float:
+        """The fixed first-epoch overhead, charged once per trial (also per member or seed)."""
+        seconds = self.first_epoch_s
+        if segmentation and self.seg_first_epoch_s is not None:
+            seconds = self.seg_first_epoch_s
+        return seconds / 60
 
     def minutes_per_image(self, height: int, width: int, segmentation: bool = False) -> float:
         rate = self.pixels_per_minute
@@ -56,6 +67,8 @@ REAL_T4 = TimingModel(
     seconds_per_image=3.93e-4,
     counts_val=True,
     seg_pixels_per_minute=640.2e6,
+    first_epoch_s=19.0,
+    seg_first_epoch_s=28.0,
 )
 
 
@@ -94,6 +107,17 @@ def card_minutes_per_epoch(
     )
 
 
+def minutes_for_epochs(
+    card: DatasetCard,
+    per_epoch: float,
+    epochs: int = SCREEN_EPOCHS,
+    timing: TimingModel | None = None,
+) -> float:
+    """Minutes a trial needs for `epochs` epochs of `per_epoch` minutes, plus its fixed overhead."""
+    timing = timing or active_timing()
+    return epochs * per_epoch + timing.overhead_minutes(card.task_type == "segmentation")
+
+
 def subset_for_epochs(
     card: DatasetCard,
     minutes: float,
@@ -107,7 +131,8 @@ def subset_for_epochs(
     height, width = (side, side) if side else card.image_size
     per_image = timing.minutes_per_image(height, width, card.task_type == "segmentation")
     val_minutes = card.split_sizes.get("val", 0) * per_image if timing.counts_val else 0.0
-    train_minutes = minutes / epochs - val_minutes
+    overhead = timing.overhead_minutes(card.task_type == "segmentation")
+    train_minutes = (minutes - overhead) / epochs - val_minutes
     if train_minutes <= 0:
         return None
     frac = math.floor(train_minutes / (card.split_sizes["train"] * per_image) * 20) / 20
@@ -118,14 +143,16 @@ def screening_advice(card: DatasetCard, timing: TimingModel | None = None) -> st
     """A hint when SCREEN_EPOCHS full-data epochs don't fit in a SCREEN_MINUTES trial."""
     timing = timing or active_timing()
     per_epoch = card_minutes_per_epoch(card, timing=timing)
-    if SCREEN_EPOCHS * per_epoch <= SCREEN_MINUTES:
+    needed = minutes_for_epochs(card, per_epoch, timing=timing)
+    if needed <= SCREEN_MINUTES:
         return None
     height, width = card.image_size
     frac = subset_for_epochs(card, SCREEN_MINUTES, timing=timing)
+    overhead_s = timing.overhead_minutes(card.task_type == "segmentation") * 60
     subset = f"use train_subset_frac <= {frac:g}, or " if frac is not None else ""
     return (
         f"One full-data epoch ({card.split_sizes['train']} samples at {height}x{width} px) is "
         f"estimated at ~{per_epoch:.1f} min ({timing.name}). For {SCREEN_EPOCHS} epochs in a "
         f"{SCREEN_MINUTES:g}-min screening trial {subset}"
-        f"short_minutes >= {SCREEN_EPOCHS * per_epoch:.1f}."
+        f"short_minutes >= {needed:.1f} (incl. {overhead_s:g} s fixed overhead)."
     )

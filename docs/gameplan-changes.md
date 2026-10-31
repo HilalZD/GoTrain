@@ -470,3 +470,7 @@ published references and the human baseline from `targets.json`.
 
 - `configs/overnight.yaml` replaces overnight_a/b (one queue, one GPU); `configs/smoke.yaml` is a 4-min real-engine check in `~/gotrain_smoke`. `launch_overnight.sh` exports `GOTRAIN_DATA_CACHE` (default `~/data_cache`, the engine default) and refuses if it is missing.
 - `DatasetCard` gains optional `majority_class_baseline` and `flat_tile_fraction`; `inspect_dataset` shows them when set; the tune prompt says to use minority-class F1/recall when the baseline is high or a class has many flat tiles.
+
+## First-epoch overhead
+
+`TimingModel` gains a fixed once-per-trial overhead (REAL_T4: +19 s classification, +28 s segmentation; fake engine: 0, it has its own setup minutes). It is added in `subset_for_epochs`, `screening_advice`, the timeout hint (`minutes_for_epochs`) and the ensemble/TTA inference estimate (once per member). Budget checks, halving costs and `can_afford_seed_check` use the trial budget the agent asks for (a cap that already includes the overhead), so they are unchanged.

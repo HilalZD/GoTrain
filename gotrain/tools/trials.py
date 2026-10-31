@@ -17,6 +17,7 @@ from gotrain.engine.rules import check_config
 from gotrain.engine.throughput import (
     SCREEN_EPOCHS,
     card_minutes_per_epoch,
+    minutes_for_epochs,
     subset_for_epochs,
 )
 from gotrain.tools._common import (
@@ -245,7 +246,7 @@ def timeout_warning(entry: dict, config: TrainConfig, card: DatasetCard, minutes
         f"out before finishing one epoch (one epoch at img_size={side}, "
         f"train_subset_frac={config.train_subset_frac:g} is estimated at ~{per_epoch:.1f} min). "
         f"The remaining configs were not started. For {SCREEN_EPOCHS} epochs in {budget:g} min "
-        f"{subset}{minutes_arg} >= {SCREEN_EPOCHS * per_epoch:.1f}."
+        f"{subset}{minutes_arg} >= {minutes_for_epochs(card, per_epoch):.1f}."
     )
 
 

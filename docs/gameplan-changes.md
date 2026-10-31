@@ -425,3 +425,21 @@ VALIDATION only.
   (old versions load with `members=[run_id]`, `tta=false`).
 - **`final_test`** passes the registered checkpoint list and TTA flag to `engine.evaluate`
   (a single checkpoint without TTA is called exactly as before).
+
+## Lessons during tune, overnight queue (M1, M2)
+
+- **M1:** at the end of every tune session (agent- or harness-registered) the driver asks the
+  agent for 2-5 lessons as JSON, from VALIDATION results only, and writes them with
+  `write_lesson`, tag `source:tune` (+ sensor and task type). If the agent gives fewer than 2
+  or fails, one automatic lesson is written from the leaderboard (best config + val score).
+  Finalise lessons are unchanged.
+- **M2:** `scripts/overnight.py <plan.yaml>` runs queue entries sequentially, tune phase only
+  (never finalise). Status in `<home>/queue_status.json`, logs in `<home>/logs/queue/`. Kill
+  switch: `~/GOTRAIN_STOP` (finish the current entry, then stop; `GOTRAIN_STOP_FILE` overrides).
+  `GOTRAIN_MEMORY=empty` uses `memory/lessons_isolated.md` (emptied at the start of the entry).
+  `label_fracs` retrains the registered config with `engine.train` directly (outside the task
+  budget, per-run limit = the registered run's minutes, at least 2) and writes validation
+  scores to `<home>/label_efficiency/<task>.json`. Choices made: the 4th entry of
+  `overnight_a.yaml` is a label_fracs entry that skips tuning when a model is already registered
+  in its home (it reuses the one the first m-eurosat entry registered; if none exists it tunes).
+  `pyyaml` added to the dependencies.

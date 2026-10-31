@@ -1,0 +1,4 @@
+# Queue B: tune only. Launch: scripts/launch_overnight.sh configs/overnight_b.yaml
+queue:
+  - {task: m-pv4ger-seg, budget_min: 150, home: ~/gotrain_home, memory: shared}
+  - {task: m-chesapeake, budget_min: 150, home: ~/gotrain_home, memory: shared}

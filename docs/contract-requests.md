@@ -93,3 +93,29 @@ Each entry: what, why, and the smallest change that would do it.
 - **Change needed:** add this to contract-v2.md if multilabel tasks (e.g. m-bigearthnet) are
   ever used.
 
+
+## 9. m-chesapeake: ignore class 0 "no data"? (changes the reported mIoU; Serena to decide)
+
+- **Verified:** class 0 is "no data", not land cover. GEO-Bench's converter reads the masks
+  through TorchGeo's `ChesapeakeCVPRDataModule(class_set=7)`, which keeps the raw Chesapeake
+  values (1 water … 6 impervious roads); TorchGeo fills out-of-raster areas with 0 and draws 0
+  as transparent. Class 0 is exactly 125 whole blank train tiles (8,192,000 px = 125 × 256²).
+  Names are now applied via `CLASS_NAME_FIXES` (0 no data, 1 water, …, 6 impervious roads).
+- **Proposed:** map class 0 to the loss's ignore index (no training signal from blank tiles),
+  never predict it (its probability set to 0), and exclude its pixels from intersection/union.
+- **Why it touches the contract:** v2's formula stays the same, but the number changes: class 0's
+  column in `per_sample` becomes all zeros (so v2's "classes with total union > 0" rule drops
+  it), and no-data pixels no longer count in other classes' unions. The chesapeake mIoU becomes
+  a 6-class mIoU, not comparable with a 7-class one or with the fake engine's.
+- **Not implemented yet.** Waiting for Serena's decision.
+
+## 10. Task name: `m-chesapeake` on disk vs `m-chesapeake-landcover` in our docs
+
+- GEO-Bench's Hugging Face zip is `segmentation_v1.0/m-chesapeake.zip` and it unzips into a
+  folder named `m-chesapeake`; the task's own name is `m-chesapeake`. The real engine finds tasks
+  by that folder name, so `describe_dataset("m-chesapeake-landcover")` fails with
+  FileNotFoundError.
+- `docs/gameplan-changes.md` says "in code we use GEO-Bench's full name,
+  `m-chesapeake-landcover`", and `FakeEngine.CARDS` uses that key.
+- **Proposed:** use `m-chesapeake` everywhere (fake engine card, prompts, budgets). The engine
+  could alternatively accept an alias, but one name is simpler to audit.

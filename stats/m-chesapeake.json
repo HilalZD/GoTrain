@@ -1,0 +1,25 @@
+{
+  "task": "m-chesapeake",
+  "split": "train",
+  "n_samples": 2000,
+  "seed": 0,
+  "bands": [
+    "Red",
+    "Green",
+    "Blue",
+    "NearInfrared"
+  ],
+  "mean": [
+    0.481318,
+    0.548404,
+    0.506569,
+    0.598219
+  ],
+  "std": [
+    0.187528,
+    0.159954,
+    0.135968,
+    0.264345
+  ],
+  "excluded_pixels": 4980736
+}

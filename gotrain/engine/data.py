@@ -62,7 +62,38 @@ CLASS_NAME_FIXES: dict[str, list[str]] = {
         "Annual Crop", "Forest", "Herbaceous Vegetation", "Highway", "Industrial Buildings",
         "Pasture", "Permanent Crop", "Residential Buildings", "River", "Sea and Lake",
     ],
+    # m-chesapeake (found by us, 2026-10-31): the task specs store only "0".."6". The masks are
+    # TorchGeo's raw Chesapeake land-cover values (GEO-Bench's converter reads them through
+    # ChesapeakeCVPRDataModule(class_set=7), which does not remap). TorchGeo draws 0 as
+    # transparent and fills out-of-raster areas with 0: class 0 is exactly 125 whole blank
+    # 256x256 train tiles. GEO-Bench's converter lists the names starting at "water" with
+    # "no-data" LAST, which is off by one. Evidence: docs/figures/m-chesapeake_samples.png
+    # (tile #49, rippled water, is class 1; 2-6 match canopy, fields, barren, roofs, roads).
+    # See docs/data_notes.md gotcha 22.
+    "m-chesapeake": [
+        "no data", "water", "tree canopy", "low vegetation", "barren",
+        "impervious other", "impervious roads",
+    ],
 }  # fmt: skip
+
+# Facts measured by one-off checks outside inspect_task (data, not logic). describe_dataset()
+# adds them to the card's notes so they survive a re-run of scratch/explore.py.
+DATASET_FACTS: dict[str, list[str]] = {
+    "m-brick-kiln": [
+        "Shortcut warning: almost-flat tiles (water, cloud, haze or fill; B04 2-98% spread < 50 "
+        "DN) are 10.8% of 'not brick kiln' train tiles and 0.0% of 'brick kiln' ones (CPU check "
+        "on 1,500 random train tiles, 2026-10-31). 'Flat tile => not kiln' is a free win that "
+        "inflates accuracy without detecting kilns.",
+        "Kilns are small (about 100-150 m, 10-15 px of a 64 px tile) and mean NDVI is the same "
+        "for both classes (0.40 vs 0.38): the model must find small objects, not land cover.",
+    ],
+    "m-chesapeake": [
+        "Class 0 'no data' marks blank tiles (125 whole train tiles; the imagery there is all "
+        "zero). It is not land cover; see docs/contract-requests.md #9 on ignoring it.",
+        "Masks have hand-drawn edges (e.g. straight barren polygons over grass): label noise "
+        "caps the IoU reachable for barren, impervious other and roads.",
+    ],
+}
 
 # Standard Sentinel-2 MSI native resolutions, used instead of the stored metadata when band
 # names are corrected (the stored resolutions belong to the mislabelled names).
@@ -87,7 +118,9 @@ SENSOR_SLUGS = {
     "ElevationBand": "elevation",
     "CloudProbability": "cloud-probability",
 }
-AERIAL_LETTERS = {"red": "r", "green": "g", "blue": "b", "nir": "n", "near-infrared": "n"}
+AERIAL_LETTERS = {
+    "red": "r", "green": "g", "blue": "b", "nir": "n", "near-infrared": "n", "nearinfrared": "n",
+}  # fmt: skip
 
 
 # ---------------------------------------------------------------------------------------------
@@ -570,6 +603,17 @@ def _extra_notes(recon: dict) -> list[str]:
         recon["task_type"], "samples"
     )
     notes.append(f"class_distribution = fraction of train {unit}.")
+    if recon["task_type"] == "classification" and recon["class_distribution"]:
+        dist = {k: v["pct"] for k, v in recon["class_distribution"].items()}
+        major = max(dist, key=dist.get)
+        if dist[major] >= 60:
+            minor = min(dist, key=dist.get)
+            notes.append(
+                f"Majority baseline: always predicting '{major}' already scores "
+                f"{dist[major]:.1f}% accuracy. Judge models by F1/recall of '{minor}', not only "
+                "accuracy."
+            )
+    notes.extend(DATASET_FACTS.get(recon["task"], []))
     if recon.get("excluded_pixels"):
         notes.append(f"{recon['excluded_pixels']} sampled train pixels excluded from stats.")
     return notes

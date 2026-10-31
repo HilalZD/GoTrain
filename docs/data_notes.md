@@ -135,6 +135,24 @@ Measured (`explore.py`, seed 0, pixel stats on 2,000 of 3,000 train images, labe
 
 ---
 
+### m-brick-kiln (classification)
+Measured on SageMaker (`explore.py`, seed 0, stats on 2,000 train images; figures `m-brick-kiln_samples.png`, `m-brick-kiln_per_label.png`):
+- **Splits:** 15,063 train / 999 val. 2 classes: "not brick kiln" 10,000 (66.39%), "brick kiln" 5,063 (33.61%). **Majority baseline: 66.4% accuracy** (gotcha 23).
+- **Image:** 64x64 at 10 m (640 m x 640 m), 13 channels, **float64**. Band names corrected (GEO-Bench known issue): `B01 B02 B03 B04 B05 B07 B8A B08 B11 B12 TCI_R TCI_G TCI_B`; no B06/B09/B10. With `ssl4eo_s2` the engine zero-fills those three and leaves out the TCI channels.
+- **Values:** reflectance bands have train means 570 (B01) to 2,069 (B8A); the TCI channels are 8-bit rendered RGB (means 68-89, p99 130-199), so scales differ ~28x (TCI_B vs B11): per-band normalisation is mandatory.
+- **Nodata:** 0%; no constant bands; no duplicates or train/val leaks found.
+- **Class-name check:** names match as far as the eye can tell at 10 m. Several "brick kiln" tiles show reddish rectangular brick yards; "not brick kiln" tiles are rivers, fields, forest and villages; no sign of swapped labels. Mean NDVI is the same for both classes (0.40 vs 0.38): kilns are small objects (10-15 px), not a land-cover type.
+- **Shortcut:** flat tiles are 10.8% of "not brick kiln" and 0.0% of "brick kiln" (one-off check on 1,500 train tiles). Card notes carry this plus the majority baseline and the advice to judge by kiln-class F1/recall.
+
+### m-chesapeake (segmentation)
+Measured on SageMaker (`explore.py`, seed 0, stats on 2,000 train images; figure `m-chesapeake_samples.png`):
+- **Splits:** 3,000 train / 1,000 val. **7 classes, names corrected** (gotcha 22): 0 no data 4.17%, 1 water 12.42%, 2 tree canopy 36.53%, 3 low vegetation 32.21%, 4 barren 4.67%, 5 impervious other 7.10%, 6 impervious roads 2.91% of train pixels (13x largest/smallest).
+- **Image:** 256x256 at 1 m (256 m x 256 m), 4 bands Red, Green, Blue, NearInfrared (NAIP-style aerial), **float32 already scaled to 0-1** (train means 0.48-0.60). Sensor slug `aerial-rgbn`.
+- **Masks:** int64, values 0-6, no values outside the classes.
+- **Nodata:** 3.8% of sampled pixels are all-zero imagery = the blank class-0 tiles.
+- **Duplicates:** 75 inside the sampled train set; **20 val images identical to a train image** (gotcha 24).
+- **Visual check:** masks are aligned with the images (roads at the same pixels). Some masks have hand-drawn straight edges (e.g. a barren polygon over grass in #808), so IoU for barren / impervious / roads is capped by label noise.
+
 ## 5. Gotchas for training (things `train.py` must handle)
 
 1. **`get_dataset()` silently gives you 3 bands.** `TaskSpecifications.get_dataset(band_names=...)` defaults to `("red", "green", "blue")`, so a 13-band dataset quietly becomes RGB-only. On a dataset with no RGB alt names it crashes instead. Always pass `band_names=[bi.name for bi in task.bands_info]` (as `_open_split` does).
@@ -163,9 +181,19 @@ Measured (`explore.py`, seed 0, pixel stats on 2,000 of 3,000 train images, labe
 16. **B10 (cirrus) is almost empty in eurosat** (mean 12, std 4.8, versus thousands for other bands). After per-band standardisation it's mostly noise. It's a cheap candidate to drop, and the agent may find that on its own.
 17. **pv4ger-seg has almost no panel-free tiles** (6 of 3,000). A model trained on it rarely sees an empty roof, so it may over-predict panels on images without any. Validation has the same bias, so val IoU won't reveal this.
 18. **`download_tasks.py` zip-slip guard was POSIX-only.** It compared against `str(dest) + "/"`, so on Windows (paths with `\`) every zip member was refused, starting with `m-eurosat/`. It's fixed with `Path.is_relative_to`, which keeps the protection on any OS.
+19. **Local CPU runtime:** `explore.py` on both tasks takes ~3m45s; data on disk is 455 MB (eurosat) + 1.5 GB (pv4ger-seg) after unzip.
 20. **SSL4EO weights always see 13 Sentinel-2 bands (engine, since M4).** With `weights="ssl4eo_s2"` the engine reorders the task's bands BY NAME to TorchGeo's order (B01..B08, B8A, B09..B12), divides by 10000 as in pretraining, zero-fills bands the task lacks (m-brick-kiln: B06, B09, B10) and leaves out non-Sentinel-2 channels (brick-kiln's TCI_R/G/B). The card's notes and each run's `metrics.json` (`zero_filled_bands`, `dropped_bands`) say so. imagenet/none weights use the selected bands with the train z-score instead.
 21. **Mixed precision is fp16** (`torch.autocast("cuda", dtype=torch.float16)` + `GradScaler`): the SageMaker Tesla T4 has no bf16.
-19. **Local CPU runtime:** `explore.py` on both tasks takes ~3m45s; data on disk is 455 MB (eurosat) + 1.5 GB (pv4ger-seg) after unzip.
+22. **m-chesapeake class names were missing and GEO-Bench's list is off by one (found 2026-10-31).** The task specs store only "0".."6". The masks hold TorchGeo's raw Chesapeake land-cover values: GEO-Bench's converter (`make_benchmark/dataset_converters/chesapeake_land_cover.py`) reads them through `ChesapeakeCVPRDataModule(class_set=7)`, which does not remap. So **0 = no data, 1 water, 2 tree canopy, 3 low vegetation, 4 barren, 5 impervious other, 6 impervious roads**. Evidence:
+    - TorchGeo fills out-of-raster areas with 0 and its colour map draws 0 as transparent. Class 0 is exactly 125 whole 256x256 train tiles (8,192,000 px), and the all-zero imagery rate (3.8% of sampled pixels, i.e. 76 of 2,000 tiles) matches the same 4.17% tile rate.
+    - `m-chesapeake_samples.png`: tile #49 (rippled water) is class 1; classes 2-6 sit on canopy, fields, a quarry, roofs and roads.
+    - GEO-Bench's converter lists the names starting at "water" with "no-data" LAST. That is off by one, which is why the names can't be taken from there.
+
+    Fixed with `CLASS_NAME_FIXES["m-chesapeake"]`. Whether class 0 should be ignored in the loss and in mIoU is open: it changes the reported mIoU (docs/contract-requests.md #9). The sample figure was drawn before the fix, so its legend still says 0-6.
+23. **m-brick-kiln: accuracy is misleading.** The majority class ("not brick kiln") is 66.4% of train, so always predicting it scores 66.4%. On top of that, almost-flat tiles (water, cloud, haze or fill; B04 2-98% spread < 50 DN) are 10.8% of not-kiln tiles and 0.0% of kiln tiles: "flat tile => not kiln" is a free shortcut. **Report F1 / recall of "brick kiln"** (diagnose()'s per-class recall shows it) next to accuracy. The flat tiles are what look like colour static in `m-brick-kiln_samples.png`. That grid shows 4 of 8, which is very unlikely at a 7-11% rate (< 1% probability), and the grid picks tiles uniformly at random (`rng.choice`, seed 0), so it is not a selection bias. More likely the 2-98% stretch also turns tiles with spreads somewhat above 50 DN into static, i.e. the near-flat share is larger than the < 50 DN count. Worth re-measuring with a higher threshold (e.g. < 150 DN) on SageMaker.
+24. **m-chesapeake has duplicates: 20 val images are byte-identical to a train image** (and 75 duplicates inside the sampled train set). Validation scores are slightly optimistic; the test split was not checked (and must not be).
+25. **Task name is `m-chesapeake`, not `m-chesapeake-landcover`.** That's the Hugging Face zip name and the folder it unzips into; the engine finds tasks by folder name. Our docs and the fake engine use the longer name (docs/contract-requests.md #10).
+26. **m-brick-kiln is stored as float64** (eurosat is int16). Same values, 4x the memory: cast to float32 before caching arrays. GeoBenchDataset already returns float32.
 
 ---
 

@@ -14,8 +14,9 @@ from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
 
+from gotrain.config import REPO_ROOT
 from gotrain.contracts import DatasetCard, EpochRecord, TrainConfig, TrainResult
-from gotrain.engine.combos import check_combo
+from gotrain.engine.rules import check_config
 from gotrain.engine.throughput import PIXELS_PER_MINUTE, estimate_minutes_per_epoch
 
 S2_BANDS = [
@@ -85,7 +86,7 @@ CHESAPEAKE_CLASSES = [
     "no_data",
 ]
 
-CARDS: dict[str, DatasetCard] = {
+HAND_CARDS: dict[str, DatasetCard] = {  # used only when no real card is cached
     "m-eurosat": DatasetCard(
         task="m-eurosat",
         task_type="classification",
@@ -157,6 +158,20 @@ CARDS: dict[str, DatasetCard] = {
         notes="FAKE card. 7-class land cover, rare 'barren' class.",
     ),
 }
+
+
+def real_card(task: str) -> DatasetCard | None:
+    """Serena's cached recon card (stats/<task>_card.json), converted by her own code, so
+    the fake engine uses the real band and class names and lessons/configs carry over."""
+    path = REPO_ROOT / "stats" / f"{task}_card.json"
+    if not path.exists():
+        return None
+    from gotrain.engine.data import to_dataset_card  # Serena's converter (numpy only)
+
+    return to_dataset_card(json.loads(path.read_text(encoding="utf-8")))
+
+
+CARDS: dict[str, DatasetCard] = {task: real_card(task) or hand for task, hand in HAND_CARDS.items()}
 
 BASE_SCORE = {  # val score of a well-tuned imagenet run
     "m-eurosat": 0.90,
@@ -584,7 +599,7 @@ class FakeEngine:
             unknown = [b for b in config.bands if b not in card.bands]
             if unknown:
                 return f"bands {unknown} not in {config.task}; available: {card.bands}"
-        return check_combo(card, config.backbone, config.weights)
+        return check_config(card, config)
 
     @staticmethod
     def _write_checkpoint(

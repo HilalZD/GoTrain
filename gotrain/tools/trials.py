@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from gotrain.contracts import DatasetCard, TrainConfig, TrainResult, format_errors
 from gotrain.engine import get_engine
-from gotrain.engine.combos import check_combo
+from gotrain.engine.rules import check_config
 from gotrain.engine.throughput import (
     SCREEN_EPOCHS,
     estimate_minutes_per_epoch,
@@ -262,7 +262,7 @@ def _parse_config(task: str, index: int, raw: Any, card: DatasetCard) -> TrainCo
         config = TrainConfig(**raw)
     except ValidationError as exc:
         return {"index": index, "error": format_errors(exc, TrainConfig)}
-    if problem := check_combo(card, config.backbone, config.weights):
+    if problem := check_config(card, config):
         return {"index": index, "error": problem}
     return config
 
@@ -369,8 +369,8 @@ def promote(run_id: str, extra_budget_minutes: float, force: bool = False) -> di
     card = _dataset_card(task)
     if isinstance(card, dict):
         return card
-    if problem := check_combo(card, config.backbone, config.weights):
-        return error(problem, "Submit a config with a valid combination via run_trials instead.")
+    if problem := check_config(card, config):
+        return error(problem, "Submit a corrected config via run_trials instead.")
     original = config.reason.split("Original reason: ")[-1]
     config = config.model_copy(
         update={"reason": f"Promoted {run_id} to {budget:g} min. Original reason: {original}"}

@@ -9,6 +9,9 @@ def home(monkeypatch, tmp_path):
     monkeypatch.setenv("GOTRAIN_ENGINE", "fake")
     monkeypatch.setenv("GOTRAIN_STORAGE", "local")
     monkeypatch.setenv("GOTRAIN_FAKE_SLEEP_S", "0")
+    # never touch the real ~/gotrain_home or the machine-wide test ledger from a test
+    monkeypatch.setenv("GOTRAIN_OFFICIAL_HOME", str(tmp_path / "gotrain_home"))
+    monkeypatch.setenv("GOTRAIN_TEST_LEDGER", str(tmp_path / "test_ledger.jsonl"))
     monkeypatch.delenv("GOTRAIN_BUCKET", raising=False)
     return dev_home
 

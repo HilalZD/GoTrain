@@ -3,6 +3,7 @@
 from gotrain.contracts import DatasetCard
 from gotrain.engine import get_engine
 from gotrain.engine.combos import valid_combos_for
+from gotrain.engine.rules import rules_for
 from gotrain.engine.throughput import screening_advice
 from gotrain.tools._common import error, tool
 from gotrain.tools.memory import matching_lessons
@@ -31,6 +32,7 @@ def summarize_card(card: DatasetCard) -> dict:
     optional = ("dtype", "value_range", "label_format", "nodata_fraction", "constant_bands")
     summary.update({k: getattr(card, k) for k in optional if getattr(card, k) is not None})
     summary["valid_backbones_by_weights"] = valid_combos_for(card)
+    summary["training_rules"] = rules_for(card)
     if hint := screening_advice(card):
         summary["screening_hint"] = hint
     if card.sensor == "sentinel-2":

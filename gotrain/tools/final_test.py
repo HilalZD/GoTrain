@@ -4,8 +4,13 @@ This is the ONLY module allowed to request the test split from engine.evaluate.
 The first call writes registry/<task>/TEST_LOCK.json *before* evaluating; every
 later call for that task is refused and gets the lock contents back. If the
 evaluation crashes, the lock stays (status "failed") and only a human may remove it.
+
+With the real engine, gotrain/vault.py adds machine-wide guards: only the official home
+may run it, and every real test is recorded in the global test ledger, which refuses a
+task already tested from any home.
 """
 
+from gotrain.config import get_settings
 from gotrain.contracts import TestRecord
 from gotrain.engine import get_engine
 from gotrain.tools._common import (
@@ -19,6 +24,7 @@ from gotrain.tools._common import (
     write_json,
 )
 from gotrain.tools.registry import list_versions, load_version, version_key
+from gotrain.vault import append_ledger, ledger_entries, real_test_problem
 
 
 def lock_key(task: str) -> str:
@@ -39,6 +45,12 @@ def final_test(task: str, version: str) -> dict:
             "Report the locked result below. Do not try to improve on it.",
             lock=read_json(lock_key(task)),
         )
+    if problem := real_test_problem(task):
+        return error(
+            f"test vault: {problem}",
+            "Report the existing result instead. Do not retry from another home.",
+            ledger=ledger_entries(task),
+        )
     mv = load_version(task, version)
     if mv is None:
         return error(
@@ -50,13 +62,18 @@ def final_test(task: str, version: str) -> dict:
         return error(f"cannot locate the checkpoint of {version}", "This is a registry bug.")
     checkpoint = storage().local_path(version_key(task, version)) / entry["checkpoint"]
 
+    real = get_settings().engine == "real"
     lock = {"task": task, "version": version, "timestamp": now_utc().isoformat()}
     write_json(lock_key(task), {"status": "started", **lock})
+    if real:
+        append_ledger(task, "started", version=version)
     try:
         out = get_engine().evaluate(task, checkpoint, split="test")
     except Exception as exc:  # keep the lock: the test set may already have been read
         failed = {"status": "failed", **lock, "error": f"{type(exc).__name__}: {exc}"}
         write_json(lock_key(task), failed)
+        if real:
+            append_ledger(task, "failed", version=version, error=failed["error"])
         return error(
             f"test evaluation crashed: {failed['error']}",
             "Stop here. The test lock stays in place; a human must inspect and remove it.",
@@ -71,4 +88,6 @@ def final_test(task: str, version: str) -> dict:
         timestamp=now_utc(),
     )
     write_json(lock_key(task), {"status": "done", **record.model_dump(mode="json")})
+    if real:
+        append_ledger(task, "done", **record.model_dump(mode="json", exclude={"task"}))
     return {**record.model_dump(mode="json"), "val_score": mv.val_score, "locked": True}

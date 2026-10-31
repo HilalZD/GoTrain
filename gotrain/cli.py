@@ -23,6 +23,7 @@ from gotrain.tools._common import git_commit
 from gotrain.tools.final_test import lock_key
 from gotrain.tools.registry import list_versions
 from gotrain.tools.trials import budget_status, init_task_budget
+from gotrain.vault import real_test_problem
 
 
 def parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -57,6 +58,8 @@ def prepare_finalise(task: str, ask: Callable[[str], str]) -> str | None:
     """Check finalise can run and get the typed confirmation. Error message, or None."""
     if get_storage().exists(lock_key(task)):
         return f"{task} has already been tested ({lock_key(task)} exists); refusing"
+    if problem := real_test_problem(task):
+        return f"test vault: {problem}; refusing"
     versions = list_versions(task)
     if not versions:
         return f"no registered versions for {task}; run the tune phase first"

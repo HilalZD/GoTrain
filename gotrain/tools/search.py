@@ -8,7 +8,7 @@ appears as a row in the output's "trials" list, which the audit log records.
 import uuid
 
 from gotrain.contracts import TrainConfig
-from gotrain.engine.combos import check_combo
+from gotrain.engine.rules import check_config
 from gotrain.tools._common import (
     error,
     find_entry,
@@ -262,7 +262,7 @@ def confirm_seeds(
     card = _dataset_card(task)
     if isinstance(card, dict):
         return card
-    if problem := check_combo(card, config.backbone, config.weights):
+    if problem := check_config(card, config):
         return error(problem, "This config is no longer valid; it can't be seed-checked.")
 
     groups = load_seed_groups(task)

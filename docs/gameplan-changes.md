@@ -266,3 +266,45 @@ Full spec for the real engine: `docs/contract-v2.md`. Backward compatible with v
   gain up to +0.6 points and TTA +0.4 points (deterministic), and `predict` genuinely averages
   each fake model's probabilities (its models are flip/rotation invariant, so `tta` has no
   effect there).
+
+## After merging Serena's engine (PR #1)
+
+- **Shared file.** `docs/contract-requests.md` is shared: either of us may append requests.
+- **Engine-only rules up front** (`gotrain/engine/rules.py`). The real engine rejects:
+  losses that don't fit the task type (classification: `ce`, `focal`, `bce`; segmentation:
+  `ce`, `dice_ce`, `focal`, `bce`, `dice_bce`), `bce`/`dice_bce` on segmentation with other
+  than 2 classes, and segmentation `img_size` not a multiple of 32. `run_trials`,
+  `run_halving`, `promote` and `confirm_seeds` now reject these before training with a fix-it
+  message, the fake engine fails on them too, `inspect_dataset` shows them as
+  `training_rules`, and the tune prompt lists them. A test fails if `rules.py` drifts from
+  the engine's own `LOSSES`, `BINARY_SEG_LOSSES` and `UNET_STRIDE`.
+- **Dev homes.** A home is a dev home if its name ends in `_dev` **or contains `_dev_`**, so
+  `~/gotrain_dev_serena` works with the fake engine (Serena's request #5).
+- **Fake names = real names.** The fake engine builds its cards from Serena's cached recon
+  cards (`stats/<task>_card.json`, via her `to_dataset_card`) where they exist, so band and
+  class names (e.g. "Red", "Annual Crop", "Sea and Lake") match the real engine and lessons
+  and configs carry over. Tasks without a cached card keep the hand-written fake card.
+- **Request #2 answered:** "timeout" = the budget ran out inside the first epoch, as the
+  engine does; it is exactly what fail-fast assumes. **Request #6** was covered by contract v2.
+- **Hardening.** `tests/test_rules.py` also flags any `allow_test=` (other than `False`, or
+  forwarding the caller's own flag) outside the top-level `evaluate()` of
+  `gotrain/engine/train.py`. The diagnose summary picks the per-class metric by name
+  (`iou`, then `recall`, then `f1`), not by dict order.
+
+## Incident log
+
+### 2026-10-31: test-vault loophole (found in review, fixed before any real test)
+
+- **Found:** while reviewing Serena's PR, before any real-engine final test had run.
+- **Problem:** the one-time test lock (`registry/<task>/TEST_LOCK.json`) lives inside each
+  `GOTRAIN_HOME`. A second home has no lock, so with the real engine a task's test set
+  could be scored once per home, which would make "tested once" meaningless.
+- **Fix:**
+  - `GOTRAIN_OFFICIAL_HOME` (default `~/gotrain_home`): with `GOTRAIN_ENGINE=real`, the
+    finalise phase and `final_test` refuse to run unless `GOTRAIN_HOME` is the official home.
+  - A machine-wide, append-only test ledger (`GOTRAIN_TEST_LEDGER`, default
+    `~/.gotrain_test_ledger.jsonl`), outside every home. Each real test appends "started"
+    before evaluating, then "done" (with the TestRecord) or "failed". A real `final_test` is
+    refused if the ledger already has the task, in any status, from any home.
+  - Fake-engine tests stay per-home and never touch the ledger.
+- **Impact:** none. No real test evaluation had been run.

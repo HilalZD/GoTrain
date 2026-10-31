@@ -6,7 +6,7 @@ import pytest
 from conftest import make_config
 
 from gotrain.contracts import ModelVersion
-from gotrain.engine.fake import FakeEngine
+from gotrain.engine.fake import CARDS, FakeEngine
 from gotrain.tools import (
     diagnose,
     final_test,
@@ -19,6 +19,7 @@ from gotrain.tools import (
     run_trials,
     write_lesson,
 )
+from gotrain.tools.diagnose import summarize_diagnosis
 
 TASK = "m-eurosat"
 
@@ -89,7 +90,8 @@ def test_diagnose_finds_rare_segmentation_class(budget):
     run_id = run_trials("m-pv4ger-seg", [cfg], 10.0)["trials"][0]["run_id"]
     out = diagnose(run_id)
     assert out["per_class_metric"] == "iou"
-    assert next(iter(out["weakest_classes"])) == "solar_panel"
+    shares = CARDS["m-pv4ger-seg"].class_distribution
+    assert next(iter(out["weakest_classes"])) == min(shares, key=shares.get)  # the rare class
 
 
 def test_diagnose_refuses_failed_and_unknown_runs(budget):
@@ -206,3 +208,24 @@ def test_engine_crash_is_a_failed_trial_not_a_tool_error(budget, monkeypatch):
 def test_every_output_reports_task_budget(budget, call):
     out = call()
     assert set(out["budget"]) == {"used_min", "remaining_min"}
+
+
+@pytest.mark.parametrize(
+    "metrics, expected",
+    [
+        ({"precision": 0.5, "pixel_share": 0.1, "iou": 0.4, "recall": 0.6}, "iou"),
+        ({"precision": 0.5, "f1": 0.55, "recall": 0.6}, "recall"),
+        ({"precision": 0.5, "f1": 0.55}, "f1"),
+        ({"accuracy_at_k": 0.7}, "accuracy_at_k"),  # unknown engine metric: its first one
+    ],
+)
+def test_diagnose_summary_picks_metric_by_name_not_order(metrics, expected):
+    raw = {
+        "curve_verdict": "fine",
+        "class_names": ["a", "b"],
+        "per_class": {"a": metrics, "b": {k: v / 2 for k, v in metrics.items()}},
+        "confusion_matrix": [[0.9, 0.1], [0.2, 0.8]],
+    }
+    out = summarize_diagnosis(raw)
+    assert out["per_class_metric"] == expected
+    assert out["weakest_classes"] == {"b": metrics[expected] / 2, "a": metrics[expected]}

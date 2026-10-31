@@ -60,7 +60,7 @@ def test_home_is_required(monkeypatch):
 
 def test_fake_engine_refuses_a_real_home(monkeypatch, tmp_path):
     monkeypatch.setenv("GOTRAIN_HOME", str(tmp_path / "gotrain_home"))
-    with pytest.raises(ValidationError, match="does not end in '_dev'"):
+    with pytest.raises(ValidationError, match="is not a dev home"):
         get_settings()
     with pytest.raises(ValidationError, match="Refusing to start"):
         get_engine()

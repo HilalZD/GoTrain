@@ -109,6 +109,12 @@ current best.** Every training tool's output tells you `seed_check_cost_min` and
 
   `inspect_dataset` lists the options valid for the current task. Segmentation uses a
   U-Net/FPN decoder on top of these backbones.
+- **Loss and image-size rules.** Anything else is rejected before training
+  (`inspect_dataset` shows them as `training_rules`):
+  - classification: `ce`, `focal` or `bce`.
+  - segmentation: `ce`, `dice_ce`, `focal`, `bce` or `dice_bce`; `bce` and `dice_bce`
+    only for 2-class masks (e.g. m-pv4ger-seg, not m-chesapeake-landcover).
+  - Segmentation `img_size` must be a multiple of 32 (e.g. 256 or 320).
 - **Inputs are already normalised per band** using train-set statistics. You do not need to
   compensate for raw value ranges.
 - **Use flips + rot90.** Satellite images have no "up", so rotations are free extra data.

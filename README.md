@@ -24,8 +24,8 @@ All agent state (runs, registry, logs, lessons) lives in `GOTRAIN_HOME`, never i
 
 | Home | Use it for |
 |---|---|
-| `~/gotrain_dev` | fake-engine runs and experiments. With the fake engine the name **must** end in `_dev` |
-| `~/gotrain_home` | real training runs on SageMaker |
+| `~/gotrain_dev` | fake-engine runs and experiments. With the fake engine the name **must** end in `_dev` or contain `_dev_` (e.g. `~/gotrain_dev_serena`) |
+| `~/gotrain_home` | real training runs on SageMaker; the only home where a real final test may run (`GOTRAIN_OFFICIAL_HOME`) |
 
 The `_dev` rule means a fake run can never write fake results into the real registry or use up a
 real task's one-time test.
@@ -76,6 +76,8 @@ All settings are environment variables. See `gotrain/config.py`.
 | `BEDROCK_MODEL_ID` | `eu.anthropic.claude-sonnet-5-5` | agent model |
 | `AWS_REGION` | `eu-central-1` | Bedrock region |
 | `GOTRAIN_FAKE_SLEEP_S` | `1.0` | seconds the fake engine sleeps per trial |
+| `GOTRAIN_OFFICIAL_HOME` | `~/gotrain_home` | the only home where a real final test may run |
+| `GOTRAIN_TEST_LEDGER` | `~/.gotrain_test_ledger.jsonl` | machine-wide record of every real test |
 
 ## Layout
 

@@ -15,6 +15,8 @@ from gotrain.images import ImageError, prepare_image
 from gotrain.tools._common import error, find_entry, run_key, storage, tool, unknown_run
 
 N_CLASSES_SHOWN = 3
+# The per-class metric to rank classes by, chosen by name (engines may add more keys).
+PER_CLASS_METRICS = ("iou", "recall", "f1")
 N_CONFUSIONS_SHOWN = 3
 VERDICT_HINTS = {
     "overfitting": "Val peaked early then fell: add augmentation, weight decay, or fewer epochs.",
@@ -40,8 +42,9 @@ def top_confusions(class_names: list[str], matrix: list[list[float]]) -> list[di
 
 def summarize_diagnosis(raw: dict) -> dict:
     """Keep the worst/best classes and biggest confusions, not the full matrix."""
-    first_class_metrics = next(iter(raw["per_class"].values()))  # e.g. {"recall": 0.91}
-    metric = next(iter(first_class_metrics))
+    first_class_metrics = next(iter(raw["per_class"].values()))  # e.g. {"recall": 0.91, ...}
+    metric = next((m for m in PER_CLASS_METRICS if m in first_class_metrics), None)
+    metric = metric or next(iter(first_class_metrics))  # unknown engine: its first metric
     per_class = {name: m[metric] for name, m in raw["per_class"].items()}
     ordered = sorted(per_class.items(), key=lambda kv: kv[1])
     return {

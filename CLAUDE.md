@@ -18,12 +18,18 @@ At the end, each task's best model is registered and scored once on TEST.
 - **Serena** owns `scratch/`, `stats/`, `docs/data_notes.md`, `docs/figures/`,
   `gotrain/engine/data.py`, `gotrain/engine/train.py`, `gotrain/engine/models.py`.
 - **Hilal** owns everything else.
+- **Shared:** `docs/contract-requests.md`. Either of us may append requests (what, why,
+  smallest change); nothing in it changes a file until its owner agrees.
 - **Never create or edit the other person's files.**
 
 ## Permanent rules
 
 - **The TEST split is sacred.** Only `gotrain/tools/final_test.py` may request the test
-  split, and only through `engine.evaluate`. `tests/test_rules.py` enforces this.
+  split, and only through `engine.evaluate`; inside the engine, only `evaluate()` in
+  `gotrain/engine/train.py` may open it (`allow_test`). `tests/test_rules.py` enforces both.
+- **Test vault (real engine).** A real final test runs only in the official home
+  (`GOTRAIN_OFFICIAL_HOME`, default `~/gotrain_home`) and is recorded in the machine-wide
+  ledger `~/.gotrain_test_ledger.jsonl`; a task already in the ledger is refused from any home.
 - **The agent tunes on VALIDATION only.**
 - **Tools take and return contract models** (`gotrain/contracts.py`) or JSON-serializable dicts.
 - Use type hints and small, readable functions. Every tool gets a test. Keep the code ruff-clean
@@ -39,8 +45,9 @@ At the end, each task's best model is registered and scored once on TEST.
 
 `GOTRAIN_HOME` is required and is never the repo. Use two homes:
 
-- `~/gotrain_dev` for fake-engine runs. With `GOTRAIN_ENGINE=fake`, the home name must end
-  in `_dev` or nothing starts, so a fake run can never lock a real task's test set.
+- `~/gotrain_dev` (or e.g. `~/gotrain_dev_serena`) for fake-engine runs. With
+  `GOTRAIN_ENGINE=fake`, the home name must end in `_dev` or contain `_dev_`, or nothing
+  starts, so a fake run can never lock a real task's test set.
 - `~/gotrain_home` for real runs.
 
 ```
@@ -55,7 +62,8 @@ memory/lessons.md
 
 - Settings come from env vars only (`gotrain/config.py`): `GOTRAIN_ENGINE` (fake|real),
   `GOTRAIN_STORAGE` (local|s3), `GOTRAIN_BUCKET`, `GEO_BENCH_DIR`, `GOTRAIN_HOME`,
-  `GOTRAIN_STATS_DIR`, `BEDROCK_MODEL_ID`, `AWS_REGION`, `GOTRAIN_FAKE_SLEEP_S`.
+  `GOTRAIN_STATS_DIR`, `BEDROCK_MODEL_ID`, `AWS_REGION`, `GOTRAIN_FAKE_SLEEP_S`,
+  `GOTRAIN_OFFICIAL_HOME`, `GOTRAIN_TEST_LEDGER`.
 - Get an engine with `gotrain.engine.get_engine()`, never by importing a concrete engine.
   The default is the fake engine, so everything runs without a GPU.
 - Run the agent with `gotrain run --task <task> --budget-min <n> --phase tune`. Finalise

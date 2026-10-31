@@ -14,9 +14,10 @@ import re
 
 import numpy as np
 
+from gotrain.config import get_settings
 from gotrain.engine import get_engine
 from gotrain.tools._common import error, find_entry, now_utc, read_json, storage, tool, write_json
-from gotrain.tools.final_test import lock_key
+from gotrain.tools.final_test import REHEARSAL_LABEL, lock_key, rehearsal_key
 from gotrain.tools.registry import list_versions, load_version, member_key
 
 BUNDLE_VERSION = 1
@@ -133,8 +134,15 @@ def card_markdown(c: dict) -> str:
     model = f"ensemble of {len(c['members'])}" if len(c["members"]) > 1 else "single model"
     calibration = json.dumps(c["calibration"]) if c["calibration"] else "none"
     classes = ", ".join(f"{i}={n}" for i, n in enumerate(c["class_names"]))
+    rehearsal = c.get("rehearsal")
+    marker = (
+        f"**{REHEARSAL_LABEL}**: scored on validation ({rehearsal['test_score']:.4f}); "
+        "this is not a test result.\n\n"
+        if rehearsal
+        else ""
+    )
     return (
-        f"# {c['tool_name']}  ({c['task']} {c['version']})\n\n"
+        f"# {c['tool_name']}  ({c['task']} {c['version']})\n\n{marker}"
         f"{c['description']}\n\n"
         f"- Sensor: {c['sensor']}; bands (in order): {', '.join(c['bands'])}\n"
         f"- Image size: {c['image_size'][0]}x{c['image_size'][1]} px; task type: {c['task_type']}\n"
@@ -152,6 +160,8 @@ def export_bundle(task: str, version: str) -> dict:
     if load_version(task, version) is None:
         raise ValueError(f"no registered version {version!r} for {task}")
     card = build_card(task, version)
+    if get_settings().rehearsal:  # scored on validation: marked everywhere, never a test result
+        card["rehearsal"] = {"label": REHEARSAL_LABEL, **read_json(rehearsal_key(task))}
     key = bundle_key(task, version)
     write_json(f"{key}/bundle.json", card)
     storage().write_text(f"{key}/model_card.md", card_markdown(card))

@@ -277,3 +277,42 @@ def test_finalise_exports_again_with_the_test_score(home):
     assert export["when"].startswith("after finalise")
     bundle = json.loads((home / "registry" / TASK / "v1" / "gopilot" / "bundle.json").read_text())
     assert 0 < bundle["test"]["test_score"] <= 1
+
+
+def test_a_failing_export_never_breaks_the_session(home, monkeypatch):
+    import gotrain.driver as driver
+
+    def boom(task, version):
+        raise RuntimeError("disk full")
+
+    monkeypatch.setattr(driver, "export_model", boom)
+    init_task_budget(TASK, 40)
+    register_model(run_trials(TASK, [make_config()], 2.0)["trials"][0]["run_id"])
+    script = [[("tool", "final_test", {"task": TASK, "version": "v1"})], [("text", "Done.")]]
+    outcome, events, audit = session(script, phase="finalise")
+
+    (failed,) = of(events, "gopilot_export_failed")
+    assert "RuntimeError: disk full" in failed["error"]
+    journal = (home / audit.journal_key).read_text(encoding="utf-8")
+    assert "GoPilot export of v1 failed" in journal
+    lock = json.loads((home / "registry" / TASK / "TEST_LOCK.json").read_text())
+    assert lock["status"] == "done" and lock["ci_low"] is not None  # the test result is intact
+    card = (home / "registry" / TASK / "v1" / "model_card.md").read_text(encoding="utf-8")
+    assert "## Test result" in card
+    assert outcome["stop_reason"] == "end_turn"
+
+
+def test_rehearsal_also_exports_a_marked_bundle(home, monkeypatch):
+    monkeypatch.setenv("GOTRAIN_REHEARSAL", "1")
+    init_task_budget(TASK, 40)
+    register_model(run_trials(TASK, [make_config()], 2.0)["trials"][0]["run_id"])
+    script = [[("tool", "final_test", {"task": TASK, "version": "v1"})], [("text", "Done.")]]
+    _, events, _ = session(script, phase="finalise")
+
+    (export,) = of(events, "gopilot_export")
+    assert export["when"] == "REHEARSAL (val)"
+    gopilot = home / "registry" / TASK / "v1" / "gopilot"
+    bundle = json.loads((gopilot / "bundle.json").read_text())
+    assert bundle["rehearsal"]["label"] == "REHEARSAL (val)" and bundle["test"] is None
+    assert "REHEARSAL (val)" in (gopilot / "model_card.md").read_text(encoding="utf-8")
+    assert not (home / "registry" / TASK / "TEST_LOCK.json").exists()

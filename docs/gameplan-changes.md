@@ -482,3 +482,7 @@ published references and the human baseline from `targets.json`.
 ## Data auditor tool
 
 `audit_dataset(task, apply_fixes=True)` wraps `gotrain.engine.audit.audit_dataset` (Serena). Cached in `registry/<task>/data_audit.json`, never charged to the GPU budget, in the tune toolset. `AuditGate` blocks run_trials/run_halving/promote/confirm_seeds until it has been read; the gate is on only with the real engine and once audit.py exists (so fake-engine tests and an unmerged auditor are unaffected). Tune prompt step 1 says to call it first.
+
+## Export hardening
+
+The driver's GoPilot export never raises: a failure goes to the audit log and journal and the session continues (TestRecord, lock, ledger, model card and lessons are written before it). `--rehearsal` also exports, with the bundle and card marked "REHEARSAL (val)" (`rehearsal` key; `test` stays null).

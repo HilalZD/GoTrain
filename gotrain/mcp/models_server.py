@@ -140,7 +140,9 @@ def list_models() -> dict:
     """The exported models: tool name, what it does, inputs, and its validation/test scores."""
     keys = ("tool_name", "task", "version", "description", "task_type", "sensor", "bands")
     models = [
-        {k: c[k] for k in keys} | {"val": c["val"], "test": c["test"]} for c in list_bundles()
+        {k: c[k] for k in keys}
+        | {"val": c["val"], "test": c["test"], "rehearsal": c.get("rehearsal")}
+        for c in list_bundles()
     ]
     return {"n_models": len(models), "models": models}
 

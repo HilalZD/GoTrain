@@ -41,7 +41,11 @@ def summarize_diagnosis(raw: dict) -> dict:
 
 @tool
 def diagnose(run_id: str) -> dict:
-    """Curve verdict (over/underfitting), weakest classes and biggest confusions of a run."""
+    """Curve verdict (over/underfitting), weakest classes and biggest confusions of a run.
+
+    Args:
+        run_id: A successful run, copied exactly from run_trials or leaderboard.
+    """
     entry = find_entry(run_id)
     if entry is None:
         return unknown_run(run_id)

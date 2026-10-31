@@ -87,7 +87,12 @@ def model_card(mv: ModelVersion, entry: dict, chain: list[str], notes: str) -> s
 
 @tool
 def register_model(run_id: str, notes: str = "") -> dict:
-    """Copy a successful run into registry/<task>/vN with a model card. Returns the version."""
+    """Copy a successful run into registry/<task>/vN with a model card. Returns the version.
+
+    Args:
+        run_id: The run to register (normally the best by validation score).
+        notes: Why this run was chosen and anything a reader of the model card should know.
+    """
     entry = find_entry(run_id)
     if entry is None:
         return unknown_run(run_id)

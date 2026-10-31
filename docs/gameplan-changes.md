@@ -69,3 +69,57 @@ The real engine plugs in through `gotrain/engine/interface.py`:
 
 Each task has a fixed GPU budget in minutes, set once by a human (`init_task_budget`).
 Tools refuse to start a trial that would exceed what remains. The agent cannot raise it.
+
+## Valid backbone + weights combinations (confirmed by Serena)
+
+| weights | backbones | tasks |
+|---|---|---|
+| `imagenet`, `none` | resnet18, resnet34, resnet50, convnext_tiny | all |
+| `ssl4eo_s2` | resnet18, resnet50 | Sentinel-2 only (m-eurosat, m-brick-kiln) |
+
+Anything else returns status "error" listing these options. The single source of truth is
+`gotrain/engine/combos.py` (`VALID_COMBOS`, `check_combo`). The tools reject invalid combos
+before training, and the fake engine fails on them the same way the real engine does.
+
+## Smarter GPU use: successive halving and seed checks (tune phase only)
+
+- **`run_halving(task, configs, short_minutes, long_minutes, keep_top)`** is the default
+  exploration round. Rung 1 trains every valid config for `short_minutes`; the `keep_top`
+  best by val score are re-trained for `long_minutes` as child runs (parent link, as with
+  `promote`). The worst-case cost `n * short + keep_top * long` is checked against the
+  remaining budget *before* anything starts; if it doesn't fit, the tool refuses and suggests
+  a round that would. Every trial of both rungs is a `trial` event in the audit log.
+- **`confirm_seeds(run_id, n_seeds=2)`** re-trains the same config (same budget) with new
+  seeds and groups the runs (`seed_group`), reporting every score, the mean and the std.
+  `leaderboard` shows mean ± std for runs in a seed group and ranks the groups by mean.
+- **Noise rule:** a gain between two candidates only counts if it is larger than the measured
+  seed noise, i.e. the larger std of the two. Before registering (budget permitting) the
+  agent seed-checks its top 2 candidates and registers the one with the best **mean**, saying
+  so in the model card notes.
+- The fake engine's seed noise is ~±0.3 points (std ≈ 0.003), deterministic per
+  (config, seed), so seed checks behave like real ones in dev runs.
+
+## Budget discipline (after the first live m-brick-kiln run)
+
+The first live tune run (fake engine) spent its budget on a promote and could no longer
+afford a seed check, so it registered a single-seed score. Its rung-1 screen at 1.5 min was
+also inconclusive: scores 0.667-0.683, a spread no bigger than seed noise, because each
+trial finished only one epoch of the 15k-sample train split.
+
+- **Budget plan.** The agent's first output is a BUDGET PLAN: ~40% explore (`run_halving`),
+  ~35% exploit (`promote` / long runs), ~25% confirm (`confirm_seeds` on the top 1-2),
+  re-checked after every round.
+- **Seed-check reserve.** `run_trials`, `run_halving` and `promote` report
+  `seed_check_cost_min` (confirm_seeds with 2 seeds on the current best = 2 x its budget)
+  and `can_afford_seed_check`. `promote` refuses if afterwards the budget could not pay
+  for a seed check of the best run (today's best or the new child, whichever costs more),
+  unless `force=true`.
+- **Screening quality.** `run_halving` reports `screening_spread` (best minus worst rung-1
+  score) and warns when it is under 0.005: "rung 1 was inconclusive; consider a longer
+  short_minutes or train_subset_frac". On train splits over 5,000 samples the agent screens
+  with `train_subset_frac` 0.2-0.3 (`inspect_dataset` adds a `screening_hint`).
+- **Registering single-seed** is allowed only when the plan explicitly ran out of budget,
+  and the model card notes must say so.
+- **Fake engine.** Epoch time scales with `train_subset_frac`, so a 0.25 subsample fits ~4x
+  the epochs in the same minutes; its reachable score is capped slightly lower
+  (3 points x (1 - frac)). Deterministic as before.

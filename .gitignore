@@ -13,3 +13,8 @@ __pycache__/
 .venv/
 .pytest_cache/
 .ruff_cache/
+
+# Agent state lives in GOTRAIN_HOME (~/gotrain_dev, ~/gotrain_home), never in the repo
+/runs/
+/registry/
+/logs/

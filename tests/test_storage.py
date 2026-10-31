@@ -35,10 +35,9 @@ def test_bad_keys_rejected(tmp_path, key):
         LocalBackend(tmp_path).write_text(key, "x")
 
 
-def test_get_storage_follows_settings(monkeypatch, tmp_path):
-    monkeypatch.setenv("GOTRAIN_HOME", str(tmp_path))
-    monkeypatch.setenv("GOTRAIN_STORAGE", "local")
+def test_get_storage_follows_settings(monkeypatch, home):
     assert isinstance(get_storage(), LocalBackend)
+    assert get_storage().root == home
     monkeypatch.setenv("GOTRAIN_STORAGE", "s3")
     monkeypatch.setenv("GOTRAIN_BUCKET", "b")
     store = get_storage(get_settings())

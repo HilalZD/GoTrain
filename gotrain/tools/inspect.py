@@ -2,10 +2,12 @@
 
 from gotrain.contracts import DatasetCard
 from gotrain.engine import get_engine
+from gotrain.engine.combos import valid_combos_for
 from gotrain.tools._common import error, tool
 from gotrain.tools.memory import matching_lessons
 
 MAX_LISTED_CLASSES = 20
+LARGE_TRAIN_SPLIT = 5000  # above this, short screening trials should use a subsample
 
 
 def summarize_card(card: DatasetCard) -> dict:
@@ -28,6 +30,12 @@ def summarize_card(card: DatasetCard) -> dict:
         summary["imbalance_ratio"] = round(max(fractions.values()) / min(fractions.values()), 1)
     optional = ("dtype", "value_range", "label_format", "nodata_fraction", "constant_bands")
     summary.update({k: getattr(card, k) for k in optional if getattr(card, k) is not None})
+    summary["valid_backbones_by_weights"] = valid_combos_for(card)
+    if card.split_sizes["train"] > LARGE_TRAIN_SPLIT:
+        summary["screening_hint"] = (
+            f"Large train split ({card.split_sizes['train']} samples): screen with "
+            "train_subset_frac 0.2-0.3 so short trials complete several epochs."
+        )
     if card.sensor == "sentinel-2":
         summary["weights_hint"] = "Sentinel-2 task: default to weights='ssl4eo_s2'."
     return summary
@@ -35,7 +43,11 @@ def summarize_card(card: DatasetCard) -> dict:
 
 @tool
 def inspect_dataset(task: str) -> dict:
-    """DatasetCard summary for `task` and the lessons tagged with its sensor or task type."""
+    """DatasetCard summary for `task` and the lessons tagged with its sensor or task type.
+
+    Args:
+        task: GEO-Bench task name, e.g. "m-eurosat".
+    """
     try:
         card = get_engine().describe_dataset(task)
     except (ValueError, FileNotFoundError) as exc:

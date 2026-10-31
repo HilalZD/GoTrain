@@ -37,12 +37,11 @@ def test_load_band_stats(monkeypatch, tmp_path):
         load_band_stats("m-brick-kiln")
 
 
-def test_settings_from_env(monkeypatch, tmp_path):
-    monkeypatch.setenv("GOTRAIN_HOME", str(tmp_path))
+def test_settings_from_env(monkeypatch, home):
     monkeypatch.setenv("GOTRAIN_STORAGE", "s3")
     monkeypatch.setenv("GOTRAIN_BUCKET", "my-bucket")
     settings = get_settings()
-    assert settings.registry_dir == tmp_path / "registry"
+    assert settings.registry_dir == home / "registry"
     assert settings.bucket == "my-bucket"
 
 
@@ -51,3 +50,28 @@ def test_s3_without_bucket_rejected(monkeypatch):
     monkeypatch.delenv("GOTRAIN_BUCKET", raising=False)
     with pytest.raises(ValidationError, match="GOTRAIN_BUCKET"):
         get_settings()
+
+
+def test_home_is_required(monkeypatch):
+    monkeypatch.delenv("GOTRAIN_HOME")
+    with pytest.raises(ValidationError, match="GOTRAIN_HOME is not set"):
+        get_settings()
+
+
+def test_fake_engine_refuses_a_real_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("GOTRAIN_HOME", str(tmp_path / "gotrain_home"))
+    with pytest.raises(ValidationError, match="does not end in '_dev'"):
+        get_settings()
+    with pytest.raises(ValidationError, match="Refusing to start"):
+        get_engine()
+
+
+def test_real_engine_may_use_a_real_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("GOTRAIN_HOME", str(tmp_path / "gotrain_home"))
+    monkeypatch.setenv("GOTRAIN_ENGINE", "real")
+    assert get_settings().home == tmp_path / "gotrain_home"
+
+
+def test_home_expands_user(monkeypatch):
+    monkeypatch.setenv("GOTRAIN_HOME", "~/gotrain_dev")
+    assert get_settings().home.is_absolute()

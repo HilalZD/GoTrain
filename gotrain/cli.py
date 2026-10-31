@@ -1,4 +1,125 @@
-"""Command-line entry point: run the agent on one task or the overnight sequence.
+"""Command-line entry point: run the agent on ONE task and ONE phase.
 
-TODO: implement main() with subcommands (run, overnight, status).
+    gotrain run --task m-eurosat --budget-min 30 --phase tune
+    gotrain run --task m-eurosat --phase finalise      (asks you to type the task name)
+
+There is deliberately no "all tasks" or "tune then finalise" mode: the one-time test
+evaluation only ever happens when a human asks for it explicitly.
 """
+
+import argparse
+import sys
+from collections.abc import Callable
+
+from pydantic import ValidationError
+
+from gotrain.agent import DEFAULT_MAX_TOOL_CALLS, build_agent, kickoff_message
+from gotrain.audit import AuditLog
+from gotrain.config import get_settings
+from gotrain.engine import get_engine
+from gotrain.storage import get_storage
+from gotrain.tools._common import git_commit
+from gotrain.tools.final_test import lock_key
+from gotrain.tools.registry import list_versions
+from gotrain.tools.trials import budget_status, init_task_budget
+
+
+def parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(prog="gotrain", description=__doc__.split("\n")[0])
+    sub = parser.add_subparsers(dest="command", required=True)
+    run = sub.add_parser("run", help="run the agent on one task and one phase")
+    run.add_argument("--task", required=True, help="GEO-Bench task, e.g. m-eurosat")
+    run.add_argument("--phase", choices=["tune", "finalise"], default="tune")
+    run.add_argument("--budget-min", type=float, help="total GPU budget for the task (tune)")
+    run.add_argument("--max-tool-calls", type=int, help="tool-call limit for this session")
+    return parser.parse_args(argv)
+
+
+def fail(message: str, code: int = 1) -> int:
+    print(f"gotrain: {message}", file=sys.stderr)
+    return code
+
+
+def prepare_tune(task: str, budget_min: float | None) -> str | None:
+    """Set (or confirm) the task budget. Returns an error message, or None if ready."""
+    if budget_min is None:
+        return "--budget-min is required for the tune phase"
+    out = init_task_budget(task, budget_min)
+    if "error" in out:
+        return f"{out['error']} ({out['hint']})"
+    if out["budget"]["remaining_min"] <= 0:
+        return f"the GPU budget for {task} is used up; nothing to tune"
+    return None
+
+
+def prepare_finalise(task: str, ask: Callable[[str], str]) -> str | None:
+    """Check finalise can run and get the typed confirmation. Error message, or None."""
+    if get_storage().exists(lock_key(task)):
+        return f"{task} has already been tested ({lock_key(task)} exists); refusing"
+    versions = list_versions(task)
+    if not versions:
+        return f"no registered versions for {task}; run the tune phase first"
+    print(f"Registered versions of {task}: {', '.join(versions)}")
+    print("The finalise phase scores ONE version on the TEST set. This can only happen once.")
+    try:
+        answer = ask(f"Type the task name ({task}) to confirm: ")
+    except EOFError:
+        answer = ""
+    if answer.strip() != task:
+        return "confirmation did not match the task name; nothing was run"
+    return None
+
+
+def run(args: argparse.Namespace, ask: Callable[[str], str] = input) -> int:
+    try:
+        settings = get_settings()
+        get_engine().describe_dataset(args.task)
+    except ValidationError as exc:
+        return fail(f"bad settings:\n{exc}", 2)
+    except Exception as exc:
+        return fail(f"cannot start on task {args.task!r}: {exc}", 2)
+
+    if args.phase == "tune":
+        problem = prepare_tune(args.task, args.budget_min)
+    else:
+        problem = prepare_finalise(args.task, ask)
+    if problem:
+        return fail(problem)
+
+    max_calls = args.max_tool_calls or DEFAULT_MAX_TOOL_CALLS[args.phase]
+    audit = AuditLog(args.task, args.phase, echo=True)
+    audit.start(
+        engine=settings.engine,
+        home=str(settings.home),
+        model=settings.bedrock_model_id,
+        git_commit=git_commit(),
+        max_tool_calls=max_calls,
+        budget=budget_status(args.task),
+    )
+    agent = build_agent(args.task, args.phase, audit=audit, max_tool_calls=max_calls)
+    try:
+        result = agent(kickoff_message(args.task, args.phase, max_calls))
+    except Exception as exc:
+        audit.end(status="crashed", error=f"{type(exc).__name__}: {exc}")
+        return fail(f"agent crashed: {exc} (see {audit.jsonl_key})")
+    usage = getattr(getattr(result, "metrics", None), "accumulated_usage", None)
+    audit.end(
+        status="finished",
+        stop_reason=str(result.stop_reason),
+        budget=budget_status(args.task),
+        usage=usage,
+    )
+    print(f"Done. Audit log: {settings.home / audit.jsonl_key}")
+    print(f"Journal:   {settings.home / audit.journal_key}")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
+    if args.command == "run":
+        return run(args)
+    return fail(f"unknown command {args.command!r}", 2)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

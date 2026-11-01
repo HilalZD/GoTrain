@@ -1,4 +1,4 @@
-# GoTrain 🛰️
+# GoTrain 
 
 **An AI agent that trains geospatial models on its own.**
 Give it a GEO-Bench dataset and a GPU time budget. It explores the data, plans how to spend its budget, screens ideas, looks at its own mistakes, verifies gains against seed noise, registers the best model, and packages it as a tool GoPilot can call through MCP. No human in the loop.
@@ -13,10 +13,10 @@ Tuned on **validation only**. The test split was touched **once per task**, at t
 
 | Task | Type | Metric | Val (agent) | Test (agent, 95% CI) | Published reference | Human baseline (val) |
 |---|---|---|---|---|---|---|
-| m-eurosat | classification | accuracy | 0.986 | _pending_ | 0.982 (MoCo-RN50) / 0.986 (TerraFM) | 0.986 |
-| m-brick-kiln | classification | accuracy | 0.990 | _pending_ | 0.988 | — |
-| m-pv4ger-seg | segmentation | mIoU | 0.958 | _pending_ | 0.952 | 0.959 |
-| m-chesapeake | segmentation | mIoU (7 classes) | _pending_ | _pending_ | 0.708 (DINO-RN50) | — |
+| m-eurosat | classification | accuracy | 0.986 ± 0.002 | **0.983** [0.975, 0.990] | 0.982 (MoCo-RN50) / 0.986 (TerraFM) | 0.986 |
+| m-brick-kiln | classification | accuracy | 0.990 ± 0.002 | **0.982** [0.973, 0.989] | 0.988 | — |
+| m-pv4ger-seg | segmentation | mIoU | 0.958 ± 0.002 | **0.955** [0.947, 0.961] | 0.952 | 0.959 |
+| m-chesapeake | segmentation | mIoU (7 classes) | 0.777 | **0.757** [0.740, 0.772] | 0.708 (DINO-RN50) | — |
 
 Published references: Prithvi-EO-2.0 (arXiv 2412.02732, appendix A1–A4) and TerraFM (arXiv 2506.06281). Human baselines are hand-tuned scripts written by our team before the agent existed; only their **scores** are shown to the agent, never their settings.
 
@@ -105,7 +105,6 @@ python scripts/demo_gopilot.py          # a Strands agent asks "Are there brick 
 Classification tools return a label, probabilities and confidence. Segmentation tools return a mask GeoTIFF, GeoJSON polygons and area per class. See [`docs/gopilot_export.md`](docs/gopilot_export.md).
 
 ---
-
 ## Repository
 
 ```
@@ -135,4 +134,4 @@ tests/                             ~400 tests
 
 ## Team
 
-Hilal Zeidan (agent, tools, MCP) · Serena (data, training engine, diagnostics) — AUB.
+Hilal Zeidan · Serena Dalal — AUB.

@@ -1,0 +1,28 @@
+{
+  "task": "m-eurosat",
+  "version": "v1",
+  "split": "val",
+  "config": "resnet50/ssl4eo_s2 lr=0.0003 wd=0.01 bs=64 img=128 ep=30 loss=ce aug=flip+rot90 bands=all",
+  "rows": [
+    {
+      "frac": 0.05,
+      "status": "ok",
+      "val_score": 0.851
+    },
+    {
+      "frac": 0.1,
+      "status": "ok",
+      "val_score": 0.944
+    },
+    {
+      "frac": 0.25,
+      "status": "ok",
+      "val_score": 0.966
+    },
+    {
+      "frac": 0.5,
+      "status": "ok",
+      "val_score": 0.981
+    }
+  ]
+}

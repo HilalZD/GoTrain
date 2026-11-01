@@ -1,0 +1,48 @@
+[
+  {
+    "task": "m-eurosat",
+    "start": "2026-10-31T17:53:27+00:00",
+    "end": "2026-10-31T18:11:12+00:00",
+    "status": "ok",
+    "best_val": 0.9856,
+    "registered_version": "v1",
+    "log": "/home/sagemaker-user/gotrain_home/logs/queue/overnight/00-m-eurosat.log"
+  },
+  {
+    "task": "m-brick-kiln",
+    "start": "2026-10-31T18:11:12+00:00",
+    "end": "2026-10-31T18:46:43+00:00",
+    "status": "ok",
+    "best_val": 0.9897,
+    "registered_version": "v1",
+    "log": "/home/sagemaker-user/gotrain_home/logs/queue/overnight/01-m-brick-kiln.log"
+  },
+  {
+    "task": "m-pv4ger-seg",
+    "start": "2026-10-31T18:46:43+00:00",
+    "end": "2026-10-31T20:22:49+00:00",
+    "status": "ok",
+    "best_val": 0.9582,
+    "registered_version": "v1",
+    "log": "/home/sagemaker-user/gotrain_home/logs/queue/overnight/02-m-pv4ger-seg.log"
+  },
+  {
+    "task": "m-chesapeake",
+    "start": "2026-10-31T20:22:49+00:00",
+    "end": "2026-10-31T22:10:07+00:00",
+    "status": "ok",
+    "best_val": 0.7765,
+    "registered_version": "v1",
+    "log": "/home/sagemaker-user/gotrain_home/logs/queue/overnight/03-m-chesapeake.log"
+  },
+  {},
+  {
+    "task": "m-eurosat",
+    "start": "2026-10-31T22:42:22+00:00",
+    "end": "2026-10-31T22:45:35+00:00",
+    "status": "ok",
+    "best_val": 0.9856,
+    "registered_version": "v1",
+    "log": "/home/sagemaker-user/gotrain_home/logs/queue/overnight/05-m-eurosat.log"
+  }
+]

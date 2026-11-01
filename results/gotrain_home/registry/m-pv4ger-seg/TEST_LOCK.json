@@ -1,0 +1,13 @@
+{
+  "status": "done",
+  "task": "m-pv4ger-seg",
+  "version": "v1",
+  "test_score": 0.95459,
+  "metric_name": "miou",
+  "git_commit": "a9781883bb03af72cdad37b6e2b552994fe85ae5",
+  "timestamp": "2026-11-01T09:47:09.105754Z",
+  "ci_low": 0.9466,
+  "ci_high": 0.9613,
+  "ci_level": 0.95,
+  "ci_resamples": 1000
+}

@@ -1,0 +1,35 @@
+{
+  "task": "m-pv4ger-seg",
+  "version": "v1",
+  "run_id": "m-pv4ger-seg-20261031-193048-992b",
+  "config": {
+    "task": "m-pv4ger-seg",
+    "backbone": "convnext_tiny",
+    "weights": "imagenet",
+    "bands": "all",
+    "img_size": 320,
+    "batch_size": 16,
+    "lr": 0.0002,
+    "weight_decay": 0.01,
+    "max_epochs": 30,
+    "loss": "ce",
+    "augment": [
+      "flip",
+      "rot90"
+    ],
+    "train_subset_frac": 1.0,
+    "seed": 0,
+    "reason": "Per VISUAL OBSERVATION (fragmented masks, missed dark panels) and HYPOTHESIS (loss matters): test ce on convnext at same 10 min budget"
+  },
+  "val_score": 0.9582,
+  "created_at": "2026-10-31T20:22:37.313700Z",
+  "git_commit": "65537a79e384bbdbe0a3496ba25fc7a077827584",
+  "artifact_path": "/home/sagemaker-user/gotrain_home/registry/m-pv4ger-seg/v1",
+  "members": [
+    "m-pv4ger-seg-20261031-193048-992b"
+  ],
+  "tta": false,
+  "val_std": 0.0015,
+  "val_n": 3,
+  "single_val_score": 0.95771
+}

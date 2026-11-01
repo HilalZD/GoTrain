@@ -1,0 +1,35 @@
+{
+  "task": "m-brick-kiln",
+  "version": "v1",
+  "run_id": "m-brick-kiln-20261031-182603-21e3",
+  "config": {
+    "task": "m-brick-kiln",
+    "backbone": "resnet50",
+    "weights": "ssl4eo_s2",
+    "bands": "all",
+    "img_size": 128,
+    "batch_size": 64,
+    "lr": 0.0003,
+    "weight_decay": 0.01,
+    "max_epochs": 30,
+    "loss": "ce",
+    "augment": [
+      "flip",
+      "rot90"
+    ],
+    "train_subset_frac": 0.4,
+    "seed": 0,
+    "reason": "Halving rung 2 of m-brick-kiln-20261031-181347-88f9 at 6 min. Original reason: upsampling helped on eurosat; kilns are small (10-15px)"
+  },
+  "val_score": 0.9897,
+  "created_at": "2026-10-31T18:46:30.007695Z",
+  "git_commit": "65537a79e384bbdbe0a3496ba25fc7a077827584",
+  "artifact_path": "/home/sagemaker-user/gotrain_home/registry/m-brick-kiln/v1",
+  "members": [
+    "m-brick-kiln-20261031-182603-21e3"
+  ],
+  "tta": false,
+  "val_std": 0.0021,
+  "val_n": 3,
+  "single_val_score": 0.99199
+}

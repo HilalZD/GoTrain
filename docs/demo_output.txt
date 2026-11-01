@@ -1,0 +1,7 @@
+Tile: /tmp/gopilot_demo_y7jelwrx/m-brick-kiln_val_tile_1.npy (VALIDATION, true class index: 1)
+MCP tools: ['list_models', 'classify_land_cover_eurosat', 'detect_brick_kilns', 'map_land_cover_chesapeake', 'segment_solar_panels']
+Called: ['detect_brick_kilns']
+
+GoPilot says:
+Yes, the model classifies this tile as containing a brick kiln. Its confidence is about 99.97%, and "not brick kiln" gets only 0.03%. The result isn't flagged for review.
+

@@ -920,6 +920,9 @@ def predict(task: str, checkpoint_path: Path | list, images: np.ndarray, tta: bo
     Each checkpoint normalises them its own way. Returns numpy arrays:
       probabilities float32 [N, K] or [N, K, H, W];  labels int64 [N] or [N, H, W]
       (multilabel: labels are the 0/1 decisions at 0.5, [N, K]).
+    If the checkpoint's run was calibrated (run_dir/calibration.json, single checkpoint, no
+    TTA), two optional keys are added: confidence (calibrated max probability, [N] or
+    [N, H, W]) and needs_review (bool, same shape: confidence below the validation threshold).
     """
     import torch
 
@@ -942,7 +945,15 @@ def predict(task: str, checkpoint_path: Path | list, images: np.ndarray, tta: bo
         labels = (probs > 0.5).astype(np.int64)
     else:
         labels = probs.argmax(1).astype(np.int64)
-    return {"probabilities": probs, "labels": labels, "n_checkpoints": len(members), "tta": tta}
+    out = {"probabilities": probs, "labels": labels, "n_checkpoints": len(members), "tta": tta}
+    # Optional confidence flags (contract request #12): only for one calibrated checkpoint
+    # without TTA, the setting its temperature and threshold were fitted for (on validation).
+    paths = checkpoint_list(checkpoint_path)
+    if len(paths) == 1 and not tta:
+        from gotrain.engine.calibration import confidence_extras
+
+        out |= confidence_extras(paths[0], probs, members[0][0]["task_type"])
+    return out
 
 
 # Integration rule (Hilal): diagnose() lives in diagnostics.py; the agent side imports it from here.
